@@ -1,0 +1,158 @@
+---
+# Package source (elasticsearch_repo_source): elastic or satellite. With `none`
+# this file is not included.
+
+# ------------------------------------------------------------------ elastic
+- name: Repository | Elastic repository
+  when: elasticsearch_repo_source == 'elastic'
+  block:
+    - name: Repository | Import Elastic GPG key
+      ansible.builtin.rpm_key:
+        key: "{{ elasticsearch_repo_gpgkey }}"
+        state: present
+      register: _es_rpm_key
+      until: _es_rpm_key is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+      when: elasticsearch_repo_gpgcheck | bool
+
+    # The repository is left disabled so a routine `dnf update` never upgrades
+    # Elasticsearch outside of a rolling upgrade; the role enables it per task.
+    - name: Repository | Configure Elasticsearch repository
+      ansible.builtin.yum_repository:
+        name: "{{ _es_repo_name }}"
+        description: "Elasticsearch repository for {{ _es_major_version }}.x packages"
+        file: elasticsearch
+        baseurl: "{{ elasticsearch_repo_baseurl }}"
+        gpgcheck: "{{ elasticsearch_repo_gpgcheck | bool }}"
+        gpgkey: "{{ elasticsearch_repo_gpgkey }}"
+        timeout: "{{ elasticsearch_repo_timeout }}"
+        retries: "{{ elasticsearch_repo_retries }}"
+        enabled: false
+
+# ---------------------------------------------------------------- satellite
+# The repository comes from Red Hat Satellite / Katello through
+# subscription-manager, which owns redhat.repo. The role only reads it, and
+# changes it through subscription-manager (enabled state, content overrides).
+- name: Repository | Red Hat Satellite / Katello repository
+  when: elasticsearch_repo_source == 'satellite'
+  block:
+    # Installed by default on RHEL; AlmaLinux and Rocky Linux hosts get it when
+    # they are registered to Katello.
+    - name: Repository | Check for subscription-manager
+      ansible.builtin.stat:
+        path: /usr/sbin/subscription-manager
+      register: _es_sat_subman
+
+    - name: Repository | Verify subscription-manager is installed
+      ansible.builtin.assert:
+        that:
+          - _es_sat_subman.stat.exists
+        fail_msg: >-
+          elasticsearch_repo_source is satellite, but subscription-manager is not installed on
+          {{ inventory_hostname }} ({{ ansible_facts['distribution'] }}
+          {{ ansible_facts['distribution_version'] }}). Install it and register the host to
+          Red Hat Satellite or Katello first.
+        quiet: true
+
+    # Prevents installing from two sources after switching from the public repository
+    - name: Repository | Remove the role's Elastic repository definition
+      ansible.builtin.yum_repository:
+        name: "{{ _es_repo_name }}"
+        file: elasticsearch
+        state: absent
+
+    - name: Repository | Look up the Satellite repository
+      ansible.builtin.script:
+        cmd: "repo_lookup.py {{ elasticsearch_satellite_repo_id | quote }} elastic"
+        executable: "{{ _es_python }}"
+      register: _es_sat_lookup
+      until: _es_sat_lookup is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+      changed_when: false
+      check_mode: false
+
+    # New content (e.g. a freshly promoted content view) reaches redhat.repo
+    # only after subscription-manager refreshes.
+    - name: Repository | Refresh subscription-manager content
+      ansible.builtin.command:
+        cmd: subscription-manager refresh
+      register: _es_sat_refresh
+      until: _es_sat_refresh is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+      when:
+        - not (_es_sat_lookup.stdout | from_json).found
+        - elasticsearch_satellite_refresh | bool
+
+    - name: Repository | Look up the Satellite repository after refresh
+      ansible.builtin.script:
+        cmd: "repo_lookup.py {{ elasticsearch_satellite_repo_id | quote }} elastic"
+        executable: "{{ _es_python }}"
+      register: _es_sat_lookup_refreshed
+      until: _es_sat_lookup_refreshed is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+      changed_when: false
+      check_mode: false
+      when: _es_sat_refresh is changed
+
+    - name: Repository | Record Satellite repository state
+      ansible.builtin.set_fact:
+        _es_sat_repo: >-
+          {{ ((_es_sat_lookup_refreshed if _es_sat_refresh is changed else _es_sat_lookup).stdout) | from_json }}
+
+    - name: Repository | Verify the Satellite repository is available
+      ansible.builtin.assert:
+        that:
+          - _es_sat_repo.found
+        fail_msg: >-
+          Repository '{{ elasticsearch_satellite_repo_id }}' is not available on {{ inventory_hostname }}.
+          Check that the host is registered to Satellite and that its content view and lifecycle
+          environment include the repository (`subscription-manager repos --list`).
+          {% if _es_sat_repo.candidates | length > 0 %}Repository ids on this host that look related:
+          {{ _es_sat_repo.candidates | join(', ') }}.{% endif %}
+        quiet: true
+
+    - name: Repository | Set the Satellite repository enabled state
+      ansible.builtin.command:
+        argv:
+          - subscription-manager
+          - repos
+          - "--{{ 'enable' if elasticsearch_satellite_repo_state == 'enabled' else 'disable' }}={{ elasticsearch_satellite_repo_id }}"
+      register: _es_sat_repo_state
+      until: _es_sat_repo_state is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+      changed_when: true
+      when:
+        - elasticsearch_satellite_repo_state != 'unmanaged'
+        - _es_sat_repo.enabled != (elasticsearch_satellite_repo_state == 'enabled')
+
+    - name: Repository | Apply Satellite content overrides
+      ansible.builtin.command:
+        argv:
+          - subscription-manager
+          - repo-override
+          - "--repo={{ elasticsearch_satellite_repo_id }}"
+          - "--add={{ item.key }}:{{ item.value }}"
+      loop: "{{ elasticsearch_satellite_repo_overrides | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}={{ item.value }}"
+      register: _es_sat_overrides
+      until: _es_sat_overrides is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+      changed_when: true
+      when: (_es_sat_repo.options[item.key | lower] | default('') | string) != (item.value | string)
+
+    - name: Repository | Import GPG key for the Satellite repository
+      ansible.builtin.rpm_key:
+        key: "{{ elasticsearch_satellite_gpgkey }}"
+        state: present
+      register: _es_sat_rpm_key
+      until: _es_sat_rpm_key is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+      when: elasticsearch_satellite_gpgkey | length > 0

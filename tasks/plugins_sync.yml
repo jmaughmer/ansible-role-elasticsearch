@@ -1,0 +1,66 @@
+---
+# Reconciles the plugins on one node.
+# Inputs:
+#   _es_plugin_host       node to act on (tasks are delegated to it)
+#   _es_plugin_reinstall  remove and reinstall every listed plugin (after upgrades)
+# Output:
+#   _es_plugins_changed   true when a plugin was removed or installed
+
+- name: "Plugins | Find installed plugins on {{ _es_plugin_host }}"
+  ansible.builtin.find:
+    paths: "{{ elasticsearch_home }}/plugins"
+    file_type: directory
+    recurse: false
+  delegate_to: "{{ _es_plugin_host }}"
+  register: _es_plugin_dirs
+
+- name: "Plugins | Work out plugin changes for {{ _es_plugin_host }}"
+  ansible.builtin.set_fact:
+    _es_plugin_installed: "{{ _es_plugin_dirs.files | map(attribute='path') | map('basename') | list }}"
+    _es_plugin_desired: >-
+      {{ (hostvars[_es_plugin_host]._es_plugins_raw | select('string') | list)
+         + (hostvars[_es_plugin_host]._es_plugins_raw | select('mapping') | map(attribute='name') | list) }}
+
+- name: "Plugins | Select plugins to remove on {{ _es_plugin_host }}"
+  ansible.builtin.set_fact:
+    _es_plugin_remove: >-
+      {{ (((_es_plugin_installed | intersect(_es_plugin_desired)) if _es_plugin_reinstall | bool else [])
+         + ((_es_plugin_installed | difference(_es_plugin_desired)) if elasticsearch_plugins_purge | bool else []))
+         | unique }}
+
+- name: "Plugins | Remove plugins on {{ _es_plugin_host }}"
+  ansible.builtin.command:
+    argv:
+      - "{{ elasticsearch_home }}/bin/elasticsearch-plugin"
+      - remove
+      - "{{ item }}"
+  loop: "{{ _es_plugin_remove }}"
+  delegate_to: "{{ _es_plugin_host }}"
+  register: _es_plugin_removed
+
+- name: "Plugins | Install plugins on {{ _es_plugin_host }}"
+  ansible.builtin.command:
+    argv:
+      - "{{ elasticsearch_home }}/bin/elasticsearch-plugin"
+      - install
+      - --batch
+      - "{{ (item.source | default(item.name)) if item is mapping else item }}"
+    # makes a retry a no-op when an earlier attempt finished installing
+    creates: "{{ elasticsearch_home }}/plugins/{{ item.name if item is mapping else item }}"
+  loop: "{{ hostvars[_es_plugin_host]._es_plugins_raw }}"
+  loop_control:
+    label: "{{ item.name if item is mapping else item }}"
+  when: (item.name if item is mapping else item) not in (_es_plugin_installed | difference(_es_plugin_remove))
+  environment: "{{ elasticsearch_plugin_install_env }}"
+  delegate_to: "{{ _es_plugin_host }}"
+  # downloads the plugin; async survives a dropped SSH session
+  async: "{{ 0 if ansible_check_mode else elasticsearch_download_async_timeout }}"
+  poll: "{{ elasticsearch_download_async_poll }}"
+  register: _es_plugin_added
+  until: _es_plugin_added is not failed
+  retries: "{{ elasticsearch_task_retries }}"
+  delay: "{{ elasticsearch_task_delay }}"
+
+- name: "Plugins | Record plugin changes for {{ _es_plugin_host }}"
+  ansible.builtin.set_fact:
+    _es_plugins_changed: "{{ _es_plugin_removed is changed or _es_plugin_added is changed }}"

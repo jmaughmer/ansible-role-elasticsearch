@@ -1,0 +1,58 @@
+---
+# fapolicyd only allows code it trusts, and its trust comes from the rpm
+# database. Plugins are unpacked by elasticsearch-plugin rather than installed
+# by rpm, so Elasticsearch cannot load them until they are trusted explicitly.
+- name: fapolicyd | Check whether fapolicyd is running
+  ansible.builtin.command:
+    cmd: systemctl is-active fapolicyd
+  register: _es_fapolicyd_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: (elasticsearch_fapolicyd_trust | string | lower) == 'auto'
+
+# Published as a fact: a rolling upgrade reinstalls plugins on each node and
+# refreshes its entries from the host that runs the upgrade, which cannot see
+# this node's role variables through hostvars.
+- name: fapolicyd | Record what this node trusts
+  ansible.builtin.set_fact:
+    _es_fapolicyd_trust: >-
+      {{ {'paths': _es_fapolicyd_paths, 'path': _es_fapolicyd_trust_file, 'name': elasticsearch_fapolicyd_trust_file}
+         if _es_fapolicyd_manage | bool else {} }}
+
+- name: fapolicyd | Manage the trust database
+  when: _es_fapolicyd_manage | bool
+  block:
+    - name: fapolicyd | Verify fapolicyd-cli is available
+      ansible.builtin.stat:
+        path: /usr/sbin/fapolicyd-cli
+      register: _es_fapolicyd_cli
+
+    - name: fapolicyd | Report a missing fapolicyd-cli
+      ansible.builtin.assert:
+        that:
+          - _es_fapolicyd_cli.stat.exists
+        fail_msg: >-
+          elasticsearch_fapolicyd_trust asks for trust entries, but /usr/sbin/fapolicyd-cli is not
+          installed on {{ inventory_hostname }}. Install the fapolicyd package, or set
+          elasticsearch_fapolicyd_trust: false and trust {{ _es_fapolicyd_paths | join(', ') }} another way.
+        quiet: true
+
+    - name: fapolicyd | Check the trust file
+      ansible.builtin.stat:
+        path: "{{ _es_fapolicyd_trust_file }}"
+      register: _es_fapolicyd_file
+
+    # The entries hold a size and a checksum per file, so they are rewritten
+    # whenever the files they cover have changed.
+    - name: fapolicyd | Refresh the trust entries
+      ansible.builtin.include_tasks:
+        file: fapolicyd_refresh.yml
+        apply:
+          tags: [elasticsearch, elasticsearch_plugins]
+      vars:
+        _es_fapolicyd_host: "{{ inventory_hostname }}"
+      when: >-
+        (not _es_fapolicyd_file.stat.exists)
+        or (_es_plugins_changed | default(false) | bool)
+        or (elasticsearch_fapolicyd_force_trust | bool)

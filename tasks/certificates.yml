@@ -1,0 +1,88 @@
+---
+- name: Certificates | Create TLS directory
+  ansible.builtin.file:
+    path: "{{ _es_tls_dir }}"
+    state: directory
+    owner: root
+    group: elasticsearch
+    mode: "0750"
+
+# Entries carry either inline content or the path of a file already on the host,
+# such as a certificate issued by ansible-role-elastic-tls.
+- name: Certificates | Install node certificate
+  ansible.builtin.copy:
+    content: "{{ _es_ssl_entry.certificate.content | default(omit) }}"
+    src: "{{ omit if _es_ssl_entry.certificate.content is defined else _es_ssl_entry.certificate.path }}"
+    remote_src: "{{ _es_ssl_entry.certificate.content is not defined }}"
+    dest: "{{ _es_tls_dir }}/node.crt"
+    owner: root
+    group: elasticsearch
+    mode: "0640"
+  register: _es_tls_cert
+
+- name: Certificates | Install node private key
+  ansible.builtin.copy:
+    content: "{{ _es_ssl_entry.key.content | default(omit) }}"
+    src: "{{ omit if _es_ssl_entry.key.content is defined else _es_ssl_entry.key.path }}"
+    remote_src: "{{ _es_ssl_entry.key.content is not defined }}"
+    dest: "{{ _es_tls_dir }}/node.key"
+    owner: root
+    group: elasticsearch
+    mode: "0640"
+  register: _es_tls_key
+  no_log: "{{ elasticsearch_no_log }}"
+  diff: false
+
+- name: Certificates | Install CA certificate
+  ansible.builtin.copy:
+    content: "{{ _es_ssl_ca_content if (_es_ssl_ca_content | length) > 0 else omit }}"
+    src: "{{ _es_ssl_ca_path if (_es_ssl_ca_path | length) > 0 else omit }}"
+    remote_src: "{{ (_es_ssl_ca_path | length) > 0 }}"
+    dest: "{{ _es_tls_dir }}/ca.crt"
+    owner: root
+    group: elasticsearch
+    mode: "0644"
+  register: _es_tls_ca
+
+- name: Certificates | Install Active Directory CA certificate
+  ansible.builtin.copy:
+    content: "{{ elasticsearch_ad_ssl_ca_certificate }}"
+    dest: "{{ _es_tls_dir }}/ad-ca.crt"
+    owner: root
+    group: elasticsearch
+    mode: "0644"
+  register: _es_tls_ad_ca
+  when:
+    - elasticsearch_ad_enabled | bool
+    - elasticsearch_ad_ssl_ca_certificate | length > 0
+
+# Fail before any restart if the key does not belong to the certificate.
+- name: Certificates | Verify private key matches certificate
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      cert_pub=$(openssl x509 -in node.crt -noout -pubkey | openssl pkey -pubin -outform DER | sha256sum)
+      key_pub=$(openssl pkey -in node.key -passin env:ES_TLS_KEY_PASSPHRASE -pubout -outform DER | sha256sum)
+      [ "$cert_pub" = "$key_pub" ]
+    chdir: "{{ _es_tls_dir }}"
+    executable: /bin/bash
+  environment:
+    ES_TLS_KEY_PASSPHRASE: "{{ _es_ssl_key_passphrase }}"
+  changed_when: false
+  check_mode: false
+  no_log: "{{ elasticsearch_no_log }}"
+
+- name: Certificates | Verify certificate chains to the CA
+  ansible.builtin.command:
+    cmd: openssl verify -CAfile ca.crt -untrusted node.crt node.crt
+    chdir: "{{ _es_tls_dir }}"
+  changed_when: false
+  check_mode: false
+  when: elasticsearch_ssl_verify_chain | bool
+
+- name: Certificates | Flag restart for certificate changes
+  ansible.builtin.set_fact:
+    _es_restart_required: true
+  when:
+    - elasticsearch_restart_on_certificate_change | bool
+    - _es_tls_cert is changed or _es_tls_key is changed or _es_tls_ca is changed or _es_tls_ad_ca is changed

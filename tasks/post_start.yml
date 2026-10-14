@@ -1,0 +1,53 @@
+---
+- name: Cluster | Wait for the cluster to be available
+  ansible.builtin.uri:
+    url: "{{ _es_api_url }}/_cluster/health?wait_for_status=yellow&timeout=30s"
+    url_username: elastic
+    url_password: "{{ elasticsearch_elastic_password }}"
+    force_basic_auth: true
+    ca_path: "{{ _es_api_ca_path }}"
+    validate_certs: "{{ elasticsearch_api_validate_certs | bool }}"
+    timeout: "{{ elasticsearch_api_timeout }}"
+    status_code: [200, 408]
+  register: _es_cluster_health
+  until:
+    - (_es_cluster_health.status | default(-1)) == 200
+    - (_es_cluster_health.json.status | default('red')) in ['yellow', 'green']
+  retries: "{{ elasticsearch_api_retries }}"
+  delay: "{{ elasticsearch_api_delay }}"
+  run_once: true
+
+- name: Cluster | Verify every play host is part of the cluster
+  ansible.builtin.uri:
+    url: "{{ _es_api_url }}/_cat/nodes?h=name&format=json"
+    url_username: elastic
+    url_password: "{{ elasticsearch_elastic_password }}"
+    force_basic_auth: true
+    ca_path: "{{ _es_api_ca_path }}"
+    validate_certs: "{{ elasticsearch_api_validate_certs | bool }}"
+    timeout: "{{ elasticsearch_api_timeout }}"
+  register: _es_cluster_nodes
+  until:
+    - (_es_cluster_nodes.status | default(-1)) == 200
+    - >-
+      ansible_play_hosts | map('extract', hostvars, '_es_node_name') | list
+      | difference(_es_cluster_nodes.json | default([]) | map(attribute='name') | list) | length == 0
+  retries: "{{ elasticsearch_api_retries }}"
+  delay: "{{ elasticsearch_api_delay }}"
+  run_once: true
+
+# cluster.initial_master_nodes must not stay in the configuration once the
+# cluster has formed. It is ignored after bootstrap, so no restart is needed.
+- name: Cluster | Stop rendering cluster.initial_master_nodes
+  ansible.builtin.set_fact:
+    _es_render_initial_master_nodes: false
+  when: _es_cluster_bootstrap | bool
+
+- name: Cluster | Remove cluster.initial_master_nodes from elasticsearch.yml
+  ansible.builtin.template:
+    src: elasticsearch.yml.j2
+    dest: "{{ elasticsearch_conf_dir }}/elasticsearch.yml"
+    owner: root
+    group: elasticsearch
+    mode: "0660"
+  when: _es_cluster_bootstrap | bool

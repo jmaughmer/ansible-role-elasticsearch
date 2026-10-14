@@ -1,0 +1,38 @@
+---
+# Included on the first host of the play only. Every node that needs a restart
+# is handled from here, one batch at a time, using delegation.
+#
+# Ordering follows Elastic's guidance: non master-eligible nodes first, then
+# master-eligible nodes, with separate concurrency limits for each.
+
+- name: Rolling restart | Build restart plan
+  ansible.builtin.set_fact:
+    _es_roll_non_master: >-
+      {{ ansible_play_hosts | map('extract', hostvars)
+         | selectattr('_es_needs_rolling', 'defined') | selectattr('_es_needs_rolling')
+         | rejectattr('_es_is_master_eligible')
+         | map(attribute='inventory_hostname') | list }}
+    _es_roll_master: >-
+      {{ ansible_play_hosts | map('extract', hostvars)
+         | selectattr('_es_needs_rolling', 'defined') | selectattr('_es_needs_rolling')
+         | selectattr('_es_is_master_eligible')
+         | map(attribute='inventory_hostname') | list }}
+
+- name: Rolling restart | Split plan into batches
+  ansible.builtin.set_fact:
+    _es_roll_batches: >-
+      {{ (_es_roll_non_master | batch(elasticsearch_rolling_restart_batch_size | int) | list)
+         + (_es_roll_master | batch(elasticsearch_rolling_restart_master_batch_size | int) | list) }}
+
+- name: Rolling restart | Show plan
+  ansible.builtin.debug:
+    msg: "{{ _es_roll_batches | map('join', ', ') | list }}"
+  when: _es_roll_batches | length > 0
+
+- name: Rolling restart | Process batches
+  ansible.builtin.include_tasks: rolling_restart_batch.yml
+  loop: "{{ _es_roll_batches }}"
+  loop_control:
+    loop_var: _es_batch
+    index_var: _es_batch_index
+    label: "{{ _es_batch | join(', ') }}"

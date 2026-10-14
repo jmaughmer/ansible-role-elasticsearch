@@ -1,0 +1,120 @@
+---
+# GeoIP downloader cluster settings and ingest pipelines, managed once through
+# the REST API. The downloader settings are applied first, so a disabled
+# downloader never starts a download when a pipeline with a geoip processor is
+# created. Pipelines carry a hash of their definition in
+# _meta.ansible_managed_hash (SHA-256), like security roles, so runs are idempotent.
+- name: Ingest | Manage GeoIP downloader settings and ingest pipelines
+  run_once: true
+  module_defaults:
+    ansible.builtin.uri:
+      url_username: elastic
+      url_password: "{{ elasticsearch_elastic_password }}"
+      force_basic_auth: true
+      ca_path: "{{ _es_api_ca_path }}"
+      validate_certs: "{{ elasticsearch_api_validate_certs | bool }}"
+      body_format: json
+      timeout: "{{ elasticsearch_api_timeout }}"
+  block:
+    # ---------------------------------------------------- downloader settings
+    - name: Ingest | Read persistent cluster settings
+      ansible.builtin.uri:
+        url: "{{ _es_api_url }}/_cluster/settings?flat_settings=true"
+      register: _es_cluster_settings
+      until: _es_cluster_settings is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+
+    # Transient settings take precedence over the persistent ones this role
+    # writes, so an override would leave the cluster on another value while the
+    # role reported success.
+    - name: Ingest | Verify no transient setting overrides the GeoIP downloader
+      ansible.builtin.assert:
+        that:
+          - _es_geoip_transient_conflicts | length == 0
+        fail_msg: >-
+          Transient cluster settings override GeoIP downloader settings managed by this role:
+          {{ _es_geoip_transient_conflicts | join('; ') }}. Transient settings win over persistent
+          ones and are lost on a full cluster restart. Remove them with
+          PUT _cluster/settings {"transient": {"<setting>": null}} and run the play again.
+        quiet: true
+      vars:
+        _es_geoip_transient: "{{ _es_cluster_settings.json.transient | default({}) }}"
+        _es_geoip_transient_conflicts: >-
+          {%- set ns = namespace(items=[]) -%}
+          {%- for key, value in _es_geoip_cluster_settings.items() -%}
+          {%-   if key in _es_geoip_transient
+                   and (_es_geoip_transient[key] | string | lower) != (value | lower) -%}
+          {%-     set ns.items = ns.items + [key ~ ' is ' ~ _es_geoip_transient[key]
+                                             ~ ', this role sets ' ~ value] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ ns.items }}
+
+    - name: Ingest | Update GeoIP downloader settings
+      ansible.builtin.uri:
+        url: "{{ _es_api_url }}/_cluster/settings"
+        method: PUT
+        body: "{{ {'persistent': {item.key: item.value}} }}"
+      loop: "{{ _es_geoip_cluster_settings | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}={{ item.value }}"
+      when: >-
+        (_es_cluster_settings.json.persistent[item.key]
+         | default(_es_geoip_cluster_setting_defaults[item.key]) | string | lower) != (item.value | lower)
+      register: _es_geoip_settings_put
+      until: _es_geoip_settings_put is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+      changed_when: true
+
+    # -------------------------------------------------------------- pipelines
+    - name: Ingest | Read existing ingest pipelines
+      ansible.builtin.uri:
+        url: "{{ _es_api_url }}/_ingest/pipeline/{{ item.name | urlencode }}"
+        status_code: [200, 404]
+      loop: "{{ elasticsearch_ingest_pipelines }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: _es_pipelines_current
+      until: _es_pipelines_current is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+
+    - name: Ingest | Create or update ingest pipelines
+      ansible.builtin.uri:
+        url: "{{ _es_api_url }}/_ingest/pipeline/{{ item.item.name | urlencode }}"
+        method: PUT
+        body: >-
+          {{ item.item.definition | combine({'_meta': (item.item.definition._meta | default({}))
+                                              | combine({'ansible_managed_hash': _es_hash})}) }}
+      vars:
+        _es_hash: "{{ item.item.definition | default({}) | to_json(sort_keys=true) | hash('sha256') }}"
+      loop: "{{ _es_pipelines_current.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when:
+        - (item.item.state | default('present')) == 'present'
+        - item.status == 404 or (item.json[item.item.name]._meta.ansible_managed_hash | default('')) != _es_hash
+      register: _es_pipelines_put
+      until: _es_pipelines_put is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+      changed_when: true
+
+    - name: Ingest | Delete ingest pipelines
+      ansible.builtin.uri:
+        url: "{{ _es_api_url }}/_ingest/pipeline/{{ item.item.name | urlencode }}"
+        method: DELETE
+        status_code: [200, 404]
+      loop: "{{ _es_pipelines_current.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when:
+        - (item.item.state | default('present')) == 'absent'
+        - item.status == 200
+      register: _es_pipelines_delete
+      until: _es_pipelines_delete is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+      changed_when: true

@@ -1,0 +1,104 @@
+---
+- name: System | Set vm.max_map_count
+  ansible.posix.sysctl:
+    name: vm.max_map_count
+    value: "{{ elasticsearch_vm_max_map_count }}"
+    sysctl_file: /etc/sysctl.d/90-elasticsearch.conf
+    reload: true
+    state: present
+  when: elasticsearch_manage_sysctl | bool
+
+- name: System | Create systemd drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/elasticsearch.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: System | Configure systemd drop-in
+  ansible.builtin.template:
+    src: systemd-override.conf.j2
+    dest: /etc/systemd/system/elasticsearch.service.d/override.conf
+    owner: root
+    group: root
+    mode: "0644"
+  register: _es_systemd_override
+
+- name: System | Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: _es_systemd_override is changed
+
+- name: System | Flag restart for systemd changes
+  ansible.builtin.set_fact:
+    _es_restart_required: true
+  when: _es_systemd_override is changed
+
+- name: System | Ensure data and log directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: elasticsearch
+    group: elasticsearch
+    mode: "2750"
+  loop:
+    - "{{ elasticsearch_data_path }}"
+    - "{{ elasticsearch_log_path }}"
+
+- name: System | Check whether firewalld is running
+  ansible.builtin.command:
+    cmd: systemctl is-active firewalld
+  register: _es_firewalld_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: elasticsearch_manage_firewall | bool
+
+- name: System | Open Elasticsearch ports in firewalld
+  ansible.posix.firewalld:
+    port: "{{ item }}/tcp"
+    zone: "{{ elasticsearch_firewall_zone }}"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop:
+    - "{{ elasticsearch_http_port }}"
+    - "{{ elasticsearch_transport_port }}"
+  when:
+    - elasticsearch_manage_firewall | bool
+    - (_es_firewalld_state.stdout | default('') | trim) == 'active'
+
+- name: System | Open additional ports in firewalld
+  ansible.posix.firewalld:
+    port: "{{ item }}"
+    zone: "{{ elasticsearch_firewall_zone }}"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop: "{{ elasticsearch_firewall_ports }}"
+  when:
+    - elasticsearch_manage_firewall | bool
+    - (_es_firewalld_state.stdout | default('') | trim) == 'active'
+
+- name: System | Open firewalld services
+  ansible.posix.firewalld:
+    service: "{{ item }}"
+    zone: "{{ elasticsearch_firewall_zone }}"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop: "{{ elasticsearch_firewall_services }}"
+  when:
+    - elasticsearch_manage_firewall | bool
+    - (_es_firewalld_state.stdout | default('') | trim) == 'active'
+
+- name: System | Report that firewalld is not running
+  ansible.builtin.debug:
+    msg: >-
+      elasticsearch_manage_firewall is on but firewalld is not running on {{ inventory_hostname }},
+      so no rules were added. Ports {{ elasticsearch_http_port }} and
+      {{ elasticsearch_transport_port }} have to be reachable however this host filters traffic.
+  when:
+    - elasticsearch_manage_firewall | bool
+    - (_es_firewalld_state.stdout | default('') | trim) != 'active'

@@ -1,0 +1,21 @@
+---
+elasticsearch_node_roles: [master, data, ingest, remote_cluster_client]
+elasticsearch_heap_size: "8g"
+
+# Generate the encrypted key block with:
+#   ansible-vault encrypt_string --stdin-name content < es-data-1.example.com.key
+ssl_certificates:
+  - name: "es-data-1.example.com"
+    certificate:
+      content: |
+        -----BEGIN CERTIFICATE-----
+        REPLACE-WITH-NODE-CERTIFICATE (followed by any intermediate certificates)
+        -----END CERTIFICATE-----
+    key:
+      # Replace with the vaulted key, e.g.
+      # content: !vault |
+      #   $ANSIBLE_VAULT;1.1;AES256
+      #   6231...
+      # An encrypted PEM key can also set `passphrase:` (vaulted).
+      content: |
+        REPLACE-WITH-VAULTED-PRIVATE-KEY

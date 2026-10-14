@@ -1,0 +1,369 @@
+---
+# =============================================================================
+# Platform
+# =============================================================================
+# Distributions accepted by preflight, as reported by ansible_facts['distribution'].
+# Major versions 9 and 10 are supported. Other Enterprise Linux rebuilds, such as
+# CentOS (Stream) or OracleLinux, can be added here but are not tested.
+elasticsearch_supported_distributions:
+  - RedHat
+  - AlmaLinux
+  - Rocky
+
+# =============================================================================
+# Package / repository
+# =============================================================================
+# Exact 9.x release to install. Pin this: changing it on an existing cluster
+# triggers a rolling upgrade (non-master nodes first, master-eligible last).
+elasticsearch_version: "9.5.4"
+
+# Where the elasticsearch package comes from:
+#   elastic   - Elastic's public repository, or a mirror of it. The role writes a
+#               disabled repository file and enables it only for its own dnf tasks.
+#   satellite - a repository synced into Red Hat Satellite or Katello and delivered
+#               through subscription-manager (redhat.repo). Hosts must be registered
+#               and the repository must be in their content view.
+#   none      - repositories are managed outside this role; packages come from
+#               whatever repositories are enabled on the host.
+elasticsearch_repo_source: elastic
+
+# --- elasticsearch_repo_source: elastic ---
+elasticsearch_repo_baseurl: "https://artifacts.elastic.co/packages/{{ _es_major_version }}.x/yum"
+elasticsearch_repo_gpgkey: "https://artifacts.elastic.co/GPG-KEY-elasticsearch"
+elasticsearch_repo_gpgcheck: true
+
+# --- elasticsearch_repo_source: satellite ---
+# Repository id as listed by `subscription-manager repos --list`, normally
+# <organization label>_<product label>_<repository label>, e.g. ACME_Elastic_Elastic_9_x
+elasticsearch_satellite_repo_id: ""
+# unmanaged - leave the enabled state to Satellite (activation key, content overrides)
+# enabled   - enable it with subscription-manager
+# disabled  - disable it so routine `dnf update` never upgrades Elasticsearch; the role
+#             still installs from it by enabling it for its own dnf tasks
+elasticsearch_satellite_repo_state: unmanaged
+# Content overrides applied with `subscription-manager repo-override`, as strings.
+# Useful for slow links, since redhat.repo cannot be edited directly:
+#   { timeout: "600", retries: "20", minrate: "100" }
+elasticsearch_satellite_repo_overrides: {}
+# Run `subscription-manager refresh` once when the repository is not yet defined on the host.
+elasticsearch_satellite_refresh: true
+# Optional GPG key to import: a URL (e.g. the product's content credential on Satellite) or
+# a path on the host. Empty relies on the repository's own gpgkey setting, which dnf imports.
+elasticsearch_satellite_gpgkey: ""
+
+# Before installing or upgrading, check that elasticsearch_version is available from the
+# package source. Catches Satellite content views that were not published or promoted.
+elasticsearch_package_version_check: true
+
+# =============================================================================
+# Cluster topology
+# =============================================================================
+elasticsearch_cluster_name: "elasticsearch"
+
+# Inventory group containing every node of this cluster. Used to build
+# discovery.seed_hosts / cluster.initial_master_nodes, so it should list all
+# nodes even when the play is run with --limit.
+elasticsearch_cluster_group: "elasticsearch"
+
+# Roles applied to any node that does not set elasticsearch_node_roles.
+elasticsearch_default_node_roles:
+  - master
+  - data
+  - ingest
+  - remote_cluster_client
+
+# Per-node settings, normally set in host_vars (intentionally NOT defined here
+# so other hosts' values can be read reliably through hostvars):
+#
+#   elasticsearch_node_roles: [master]           # [] = coordinating-only node
+#   elasticsearch_node_name: es-master-1         # defaults to inventory_hostname
+#   elasticsearch_discovery_address: 10.0.0.11   # defaults to inventory_hostname
+
+# auto  -> single-node when the cluster group has exactly one host
+elasticsearch_discovery_type: auto
+# Explicit seed host list ("host" or "host:port"). Empty = all master-eligible
+# hosts from elasticsearch_cluster_group.
+elasticsearch_discovery_seed_hosts: []
+
+# auto  -> bootstrap (set cluster.initial_master_nodes) only when no node in the
+#          play has existing data and none are running.
+# true/false to override detection.
+elasticsearch_cluster_bootstrap: auto
+
+elasticsearch_node_attributes: {}
+
+# =============================================================================
+# JVM
+# =============================================================================
+# "auto" lets Elasticsearch size the heap; otherwise e.g. "4g" or "16384m".
+# Override per node in host_vars. Keep it <= 50% of RAM and below ~31g.
+elasticsearch_heap_size: auto
+# Additional lines written to jvm.options.d/ansible.options
+elasticsearch_jvm_options: []
+
+# =============================================================================
+# Paths / network / OS
+# =============================================================================
+elasticsearch_home: /usr/share/elasticsearch
+elasticsearch_conf_dir: /etc/elasticsearch
+elasticsearch_data_path: /var/lib/elasticsearch
+elasticsearch_log_path: /var/log/elasticsearch
+elasticsearch_path_repo: []
+
+elasticsearch_network_host: ["_local_", "_site_"]
+elasticsearch_network_publish_host: ""
+elasticsearch_http_port: 9200
+elasticsearch_transport_port: 9300
+
+elasticsearch_memory_lock: true
+# Set to false where the kernel setting can't be changed (e.g. containers);
+# the host must then already provide vm.max_map_count >= 262144.
+elasticsearch_manage_sysctl: true
+elasticsearch_vm_max_map_count: 1048576
+elasticsearch_systemd_timeout_start_sec: 900
+elasticsearch_systemd_environment: {}
+
+elasticsearch_manage_firewall: true
+elasticsearch_firewall_zone: public
+# The HTTP and transport ports are opened for you. These are for anything else
+# this host serves, in firewalld's own form:
+#   elasticsearch_firewall_ports: ["9600/tcp", "9200-9205/tcp"]
+elasticsearch_firewall_ports: []
+# Named firewalld services, e.g. ["https"]
+elasticsearch_firewall_services: []
+
+# Free-form settings merged at the end of elasticsearch.yml. Do not repeat keys
+# the role already renders.
+elasticsearch_config_extra: {}
+
+# =============================================================================
+# TLS
+# =============================================================================
+# Entry in the host's `ssl_certificates` list to use for this node.
+elasticsearch_ssl_certificate_name: "{{ inventory_hostname }}"
+# PEM CA certificate(s) that issued the node certificates. An entry may also
+# carry its own `ca.content`, which takes precedence.
+elasticsearch_ssl_ca_certificate: ""
+# Path to a CA file already on the host, as an alternative to the content above
+# (for example one installed by ansible-role-elastic-tls).
+elasticsearch_ssl_ca_certificate_path: ""
+elasticsearch_ssl_verify_chain: true
+elasticsearch_transport_ssl_verification_mode: full
+elasticsearch_http_ssl_client_authentication: none
+# Elasticsearch hot-reloads PEM certificate/key/CA files, so replacing them
+# does not normally require a restart.
+elasticsearch_restart_on_certificate_change: false
+# Remove the certs/ directory created by the RPM security auto-configuration.
+elasticsearch_remove_autoconfig_certs: true
+
+# =============================================================================
+# Security / API access
+# =============================================================================
+# Password for the built-in `elastic` user (vault this). Seeded through
+# bootstrap.password when a node is first installed and used for all API calls.
+# elasticsearch_elastic_password: "{{ vault_elasticsearch_elastic_password }}"
+
+# Host name the role uses to reach each node's HTTP API. Must match a SAN in
+# the node certificate.
+elasticsearch_api_host: "{{ inventory_hostname }}"
+elasticsearch_api_validate_certs: true
+# Polling loops that wait for a node or the cluster (health, node join, HTTP up)
+elasticsearch_api_retries: 90
+elasticsearch_api_delay: 10
+# Per-request HTTP timeout (seconds) for REST API calls
+elasticsearch_api_timeout: 60
+
+# Additional secure settings: { "setting.name": "value" } (vault the values)
+elasticsearch_keystore_entries: {}
+
+elasticsearch_no_log: true
+
+# =============================================================================
+# License
+# =============================================================================
+# Self-generated license type applied when the cluster first forms.
+elasticsearch_license_self_generated_type: basic
+# Contents of the license JSON file from Elastic, as a dict or JSON string,
+# e.g. "{{ lookup('ansible.builtin.file', 'files/license.json') }}"
+elasticsearch_license: ""
+
+# =============================================================================
+# Realms / Active Directory
+# =============================================================================
+elasticsearch_file_realm_order: 0
+elasticsearch_native_realm_order: 1
+
+elasticsearch_ad_enabled: false
+elasticsearch_ad_realm_name: ad1
+elasticsearch_ad_order: 2
+elasticsearch_ad_domain_name: ""            # example.com
+elasticsearch_ad_urls: []                   # ["ldaps://dc1.example.com:636"]
+elasticsearch_ad_bind_dn: ""                # svc-elasticsearch@example.com
+elasticsearch_ad_bind_password: ""          # vault this
+elasticsearch_ad_user_search_base_dn: ""
+elasticsearch_ad_group_search_base_dn: ""
+elasticsearch_ad_load_balance_type: failover
+elasticsearch_ad_ssl_verification_mode: full
+# PEM CA for the domain controllers' LDAPS certificates. Empty = reuse tls/ca.crt
+elasticsearch_ad_ssl_ca_certificate: ""
+elasticsearch_ad_cache_ttl: 20m
+elasticsearch_ad_unmapped_groups_as_roles: false
+# Any other realm setting, without the realm prefix: { "follow_referrals": false }
+elasticsearch_ad_extra_settings: {}
+
+# =============================================================================
+# Security roles and role mappings (managed through the REST API)
+# =============================================================================
+# - name: logs_reader
+#   state: present              # or absent
+#   definition:                 # body of PUT _security/role/<name>
+#     cluster: [monitor]
+#     indices:
+#       - names: ["logs-*"]
+#         privileges: [read, view_index_metadata]
+elasticsearch_security_roles: []
+
+# - name: ad_es_admins
+#   definition:                 # body of PUT _security/role_mapping/<name>
+#     enabled: true
+#     roles: [superuser]
+#     rules:
+#       all:
+#         - field: { realm.name: ad1 }
+#         - field: { groups: "CN=ES-Admins,OU=Groups,DC=example,DC=com" }
+elasticsearch_security_role_mappings: []
+
+# =============================================================================
+# GeoIP processor and ingest pipelines
+# =============================================================================
+# The GeoIP downloader fetches the GeoLite2 City, Country and ASN databases into
+# the cluster and keeps them up to date. Nodes need HTTPS access to the endpoint.
+# These three are dynamic cluster settings, applied through the API (no restart).
+#   enabled        - false stops updates and deletes downloaded databases; use it
+#                    for air-gapped clusters that use elasticsearch_geoip_databases.
+#   eager_download - download right away instead of when the first pipeline with
+#                    a geoip processor is created.
+#   poll_interval  - how often to check for updates (Elasticsearch default 3d,
+#                    minimum 1d). Empty leaves it unmanaged.
+elasticsearch_geoip_downloader_enabled: true
+elasticsearch_geoip_downloader_eager_download: false
+elasticsearch_geoip_downloader_poll_interval: ""
+# Static setting ingest.geoip.downloader.endpoint in elasticsearch.yml, e.g. an internal
+# mirror built with `bin/elasticsearch-geoip` and served over HTTP(S). Changing it
+# restarts nodes. Empty uses Elastic's endpoint.
+elasticsearch_geoip_downloader_endpoint: ""
+
+# .mmdb databases installed in <elasticsearch_conf_dir>/ingest-geoip, for air-gapped
+# clusters or commercial MaxMind / IPinfo databases. Reference them in a processor
+# with database_file. Elasticsearch prefers downloaded databases over files with the
+# same name, so disable the downloader when shipping your own GeoLite2-*.mmdb.
+#   - name: GeoLite2-City.mmdb
+#     src: geoip/GeoLite2-City.mmdb     # file on the control node (playbook files/ path), or
+#     url: https://mirror.example.com/geoip/GeoLite2-City.mmdb
+#     checksum: "sha256:..."            # with url: replaces the file when the checksum differs
+#   - name: GeoIP2-Old.mmdb
+#     state: absent
+elasticsearch_geoip_databases: []
+# Nodes that get the databases: only nodes with the ingest role, unless this is true.
+elasticsearch_geoip_databases_all_nodes: false
+# Remove .mmdb files in ingest-geoip that are not listed above. This runs on every
+# node, so a node that no longer has the ingest role does not keep stale databases.
+elasticsearch_geoip_databases_purge: false
+# Elasticsearch reloads files in ingest-geoip on its own. Set to true to restart
+# nodes (rolling) when a database file changes instead.
+elasticsearch_geoip_restart_on_change: false
+
+# Ingest pipelines, managed through the REST API like security roles:
+#   - name: geoip-client
+#     state: present              # or absent
+#     definition:                 # body of PUT _ingest/pipeline/<name>
+#       description: Add client geolocation
+#       processors:
+#         - geoip: { field: client.ip, target_field: client.geo, ignore_missing: true }
+elasticsearch_ingest_pipelines: []
+
+# =============================================================================
+# Plugins
+# =============================================================================
+# Strings are official plugin names; dicts allow a URL/path source:
+#   - mapper-size
+#   - name: my-plugin
+#     source: https://repo.example.com/my-plugin-9.5.4.zip
+elasticsearch_plugins: []
+# Remove installed plugins that are not listed above.
+elasticsearch_plugins_purge: false
+# Environment for elasticsearch-plugin, e.g. proxy settings:
+#   CLI_JAVA_OPTS: "-Dhttps.proxyHost=proxy.example.com -Dhttps.proxyPort=3128"
+elasticsearch_plugin_install_env: {}
+
+# =============================================================================
+# Restarts
+# =============================================================================
+# Restart nodes (rolling) when configuration, JVM options, keystore, systemd
+# override or plugins change. When false, pending restarts are only reported.
+elasticsearch_restart_on_change: true
+# Perform a rolling restart of every running node in the play regardless.
+elasticsearch_force_restart: false
+# Maximum number of non-master nodes restarted at the same time.
+elasticsearch_rolling_restart_batch_size: 1
+# Maximum number of master-eligible nodes restarted at the same time.
+elasticsearch_rolling_restart_master_batch_size: 1
+# Health required before each batch and after it rejoins.
+elasticsearch_cluster_health_status: "{{ 'yellow' if (_es_cluster_hosts | length) == 1 else 'green' }}"
+
+# =============================================================================
+# Hardened hosts (FIPS, SELinux, fapolicyd)
+# =============================================================================
+# Application level FIPS mode. A host running in FIPS mode does NOT put the JDK
+# Elasticsearch ships with into FIPS mode; this setting does. It also needs a
+# FIPS certified security provider in that JDK and an Enterprise or trial license.
+elasticsearch_fips_mode: false
+# xpack.security.authc.password_hashing.algorithm. FIPS mode requires a pbkdf2
+# variant such as pbkdf2_stretch. Empty keeps Elasticsearch's default.
+elasticsearch_password_hashing_algorithm: ""
+# TLS protocols and cipher suites for the HTTP and transport layers. Empty keeps
+# Elasticsearch's defaults (TLSv1.3 and TLSv1.2).
+#   elasticsearch_ssl_supported_protocols: ["TLSv1.3", "TLSv1.2"]
+elasticsearch_ssl_supported_protocols: []
+elasticsearch_ssl_cipher_suites: []
+
+# SELinux: label data and log directories that have been moved out of their
+# default locations, which otherwise end up as default_t.
+#   auto  - manage them when SELinux is enabled on the host
+#   true / false
+elasticsearch_selinux_manage: auto
+elasticsearch_selinux_data_type: var_lib_t
+elasticsearch_selinux_log_type: var_log_t
+# Extra or overriding contexts: { "/srv/elasticsearch": "var_lib_t" }
+elasticsearch_selinux_fcontexts: {}
+
+# fapolicyd: trust what Elasticsearch loads but rpm did not install, which means
+# plugins. Without this the service cannot load them on a host running fapolicyd.
+#   auto  - manage the trust entries when fapolicyd is running
+#   true / false
+elasticsearch_fapolicyd_trust: auto
+# Empty trusts the plugin directory. Directories are added recursively.
+elasticsearch_fapolicyd_trust_paths: []
+# File under /etc/fapolicyd/trust.d/ the entries are written to
+elasticsearch_fapolicyd_trust_file: ansible-elasticsearch
+# Rewrite the entries even when no plugin changed
+elasticsearch_fapolicyd_force_trust: false
+
+# =============================================================================
+# Network resilience (high-latency / low-bandwidth links)
+# See README.md (Slow and unreliable networks) and examples/inventory/group_vars/all/network.yml
+# =============================================================================
+# Retries for tasks that download (GPG key, packages, plugins) or make one-off
+# REST API calls.
+elasticsearch_task_retries: 3
+elasticsearch_task_delay: 15
+# Package and plugin downloads run as async jobs so they keep running on the
+# host if the SSH session drops: maximum run time and poll interval (seconds).
+elasticsearch_download_async_timeout: 3600
+elasticsearch_download_async_poll: 15
+# dnf repository per-request timeout (seconds) and download retries. dnf aborts
+# downloads slower than its minimum rate only after `timeout` seconds.
+elasticsearch_repo_timeout: 120
+elasticsearch_repo_retries: 10
+# Wait this long for the dnf lock (e.g. held by an interrupted earlier attempt)
+elasticsearch_dnf_lock_timeout: 300

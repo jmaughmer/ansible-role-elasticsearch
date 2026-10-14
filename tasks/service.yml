@@ -1,0 +1,47 @@
+---
+- name: Service | Enable Elasticsearch service
+  ansible.builtin.systemd_service:
+    name: elasticsearch
+    enabled: true
+
+# New and stopped nodes hold no live shards, so they are started in parallel.
+# This is also what lets a brand-new multi-node cluster bootstrap.
+- name: Service | Start Elasticsearch on nodes that are not running
+  ansible.builtin.systemd_service:
+    name: elasticsearch
+    state: started
+    no_block: true
+  register: _es_service_started
+  when: not (_es_is_running | bool)
+
+- name: Service | Wait for HTTP layer on started nodes
+  ansible.builtin.uri:
+    url: "{{ _es_api_url }}/"
+    ca_path: "{{ _es_api_ca_path }}"
+    validate_certs: "{{ elasticsearch_api_validate_certs | bool }}"
+    timeout: "{{ elasticsearch_api_timeout }}"
+    status_code: [200, 401]
+  register: _es_http_probe
+  until: (_es_http_probe.status | default(-1)) in [200, 401]
+  retries: "{{ elasticsearch_api_retries }}"
+  delay: "{{ elasticsearch_api_delay }}"
+  when: _es_service_started is changed
+
+- name: Service | Determine nodes that need a rolling restart
+  ansible.builtin.set_fact:
+    _es_needs_rolling: >-
+      {{ (_es_is_running | bool)
+         and ((_es_upgrade_pending | bool)
+              or (elasticsearch_force_restart | bool)
+              or ((_es_restart_required | bool) and (elasticsearch_restart_on_change | bool))) }}
+
+- name: Service | Report restarts that were skipped
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} has configuration changes that require a restart, but
+      elasticsearch_restart_on_change is false. Restart it manually or re-run with
+      -e elasticsearch_force_restart=true.
+  when:
+    - _es_is_running | bool
+    - _es_restart_required | bool
+    - not (elasticsearch_restart_on_change | bool)

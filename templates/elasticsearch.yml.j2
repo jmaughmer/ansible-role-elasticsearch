@@ -1,0 +1,130 @@
+# {{ ansible_managed }}
+# Elasticsearch {{ elasticsearch_version }} - {{ _es_node_name }}
+
+# ---------------------------------- Cluster -----------------------------------
+cluster.name: {{ elasticsearch_cluster_name | to_json }}
+
+# ----------------------------------- Node -------------------------------------
+node.name: {{ _es_node_name | to_json }}
+node.roles: {{ _es_node_roles | list | to_json }}
+{% for key, value in elasticsearch_node_attributes | dictsort %}
+node.attr.{{ key }}: {{ value | to_json }}
+{% endfor %}
+
+# ----------------------------------- Paths ------------------------------------
+path.data: {{ elasticsearch_data_path | to_json }}
+path.logs: {{ elasticsearch_log_path | to_json }}
+{% if elasticsearch_path_repo | length > 0 %}
+path.repo: {{ elasticsearch_path_repo | list | to_json }}
+{% endif %}
+
+# ---------------------------------- Memory ------------------------------------
+bootstrap.memory_lock: {{ elasticsearch_memory_lock | bool | to_json }}
+
+# ---------------------------------- Network -----------------------------------
+network.host: {{ elasticsearch_network_host | to_json }}
+{% if elasticsearch_network_publish_host | length > 0 %}
+network.publish_host: {{ elasticsearch_network_publish_host | to_json }}
+{% endif %}
+http.port: {{ elasticsearch_http_port }}
+transport.port: {{ elasticsearch_transport_port }}
+
+# --------------------------------- Discovery ----------------------------------
+{% if _es_discovery_type == 'single-node' %}
+discovery.type: single-node
+{% else %}
+discovery.seed_hosts:
+{% if elasticsearch_discovery_seed_hosts | length > 0 %}
+{% for seed in elasticsearch_discovery_seed_hosts %}
+  - {{ seed | to_json }}
+{% endfor %}
+{% else %}
+{% for host in _es_master_eligible_hosts %}
+  - {{ ((hostvars[host].elasticsearch_discovery_address | default(host)) ~ ':' ~ elasticsearch_transport_port) | to_json }}
+{% endfor %}
+{% endif %}
+{% if _es_render_initial_master_nodes | default(false) | bool %}
+# Present only while bootstrapping a new cluster. The role removes it once the
+# cluster has formed.
+cluster.initial_master_nodes:
+{% for host in _es_master_eligible_hosts %}
+  - {{ (hostvars[host].elasticsearch_node_name | default(host)) | to_json }}
+{% endfor %}
+{% endif %}
+{% endif %}
+
+# --------------------------------- Security -----------------------------------
+xpack.security.enabled: true
+xpack.security.enrollment.enabled: false
+xpack.license.self_generated.type: {{ elasticsearch_license_self_generated_type | to_json }}
+{% if elasticsearch_fips_mode | bool %}
+xpack.security.fips_mode.enabled: true
+{% endif %}
+{% if elasticsearch_password_hashing_algorithm | length > 0 %}
+xpack.security.authc.password_hashing.algorithm: {{ elasticsearch_password_hashing_algorithm | to_json }}
+{% endif %}
+
+xpack.security.http.ssl.enabled: true
+xpack.security.http.ssl.key: "tls/node.key"
+xpack.security.http.ssl.certificate: "tls/node.crt"
+xpack.security.http.ssl.certificate_authorities: ["tls/ca.crt"]
+xpack.security.http.ssl.client_authentication: {{ elasticsearch_http_ssl_client_authentication | to_json }}
+
+xpack.security.transport.ssl.enabled: true
+xpack.security.transport.ssl.verification_mode: {{ elasticsearch_transport_ssl_verification_mode | to_json }}
+xpack.security.transport.ssl.client_authentication: required
+xpack.security.transport.ssl.key: "tls/node.key"
+xpack.security.transport.ssl.certificate: "tls/node.crt"
+xpack.security.transport.ssl.certificate_authorities: ["tls/ca.crt"]
+{% for layer in ['http', 'transport'] %}
+{% if elasticsearch_ssl_supported_protocols | length > 0 %}
+xpack.security.{{ layer }}.ssl.supported_protocols: {{ elasticsearch_ssl_supported_protocols | list | to_json }}
+{% endif %}
+{% if elasticsearch_ssl_cipher_suites | length > 0 %}
+xpack.security.{{ layer }}.ssl.cipher_suites: {{ elasticsearch_ssl_cipher_suites | list | to_json }}
+{% endif %}
+{% endfor %}
+
+# ------------------------------ Authentication --------------------------------
+# Configuring any realm disables the implicit defaults, so file and native
+# realms are declared explicitly.
+xpack.security.authc.realms.file.file1.order: {{ elasticsearch_file_realm_order }}
+xpack.security.authc.realms.native.native1.order: {{ elasticsearch_native_realm_order }}
+{% if elasticsearch_ad_enabled | bool %}
+{% set realm = 'xpack.security.authc.realms.active_directory.' ~ elasticsearch_ad_realm_name %}
+
+# Active Directory (requires a Platinum/Enterprise or trial license)
+{{ realm }}.order: {{ elasticsearch_ad_order }}
+{{ realm }}.domain_name: {{ elasticsearch_ad_domain_name | to_json }}
+{{ realm }}.url: {{ elasticsearch_ad_urls | list | to_json }}
+{{ realm }}.load_balance.type: {{ elasticsearch_ad_load_balance_type | to_json }}
+{% if elasticsearch_ad_bind_dn | length > 0 %}
+{{ realm }}.bind_dn: {{ elasticsearch_ad_bind_dn | to_json }}
+{% endif %}
+{% if elasticsearch_ad_user_search_base_dn | length > 0 %}
+{{ realm }}.user_search.base_dn: {{ elasticsearch_ad_user_search_base_dn | to_json }}
+{% endif %}
+{% if elasticsearch_ad_group_search_base_dn | length > 0 %}
+{{ realm }}.group_search.base_dn: {{ elasticsearch_ad_group_search_base_dn | to_json }}
+{% endif %}
+{{ realm }}.ssl.certificate_authorities: [{{ _es_ad_ca_file | to_json }}]
+{{ realm }}.ssl.verification_mode: {{ elasticsearch_ad_ssl_verification_mode | to_json }}
+{{ realm }}.unmapped_groups_as_roles: {{ elasticsearch_ad_unmapped_groups_as_roles | bool | to_json }}
+{{ realm }}.cache.ttl: {{ elasticsearch_ad_cache_ttl | to_json }}
+{% for key, value in elasticsearch_ad_extra_settings | dictsort %}
+{{ realm }}.{{ key }}: {{ value | to_json }}
+{% endfor %}
+{% endif %}
+
+{% if elasticsearch_geoip_downloader_endpoint | length > 0 %}
+# ---------------------------------- Ingest ------------------------------------
+ingest.geoip.downloader.endpoint: {{ elasticsearch_geoip_downloader_endpoint | to_json }}
+
+{% endif %}
+# ---------------------------------- Various -----------------------------------
+action.destructive_requires_name: true
+{% if elasticsearch_config_extra | length > 0 %}
+
+# ------------------------------ Extra settings --------------------------------
+{{ elasticsearch_config_extra | to_nice_yaml(indent=2) }}
+{% endif %}

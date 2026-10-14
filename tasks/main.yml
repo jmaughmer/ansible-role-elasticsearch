@@ -1,0 +1,91 @@
+---
+# Phase 1 - every host in parallel: gather state, validate, install and render
+# configuration. Nothing here restarts a running node; changes that need a
+# restart only set _es_restart_required.
+- name: Gather node state
+  ansible.builtin.import_tasks: facts.yml
+  tags: [elasticsearch, always]
+
+- name: Preflight checks
+  ansible.builtin.import_tasks: preflight.yml
+  tags: [elasticsearch, always]
+
+- name: Configure package repository
+  ansible.builtin.import_tasks: repository.yml
+  when: elasticsearch_repo_source != 'none'
+  tags: [elasticsearch, elasticsearch_install]
+
+- name: Install Elasticsearch
+  ansible.builtin.import_tasks: install.yml
+  tags: [elasticsearch, elasticsearch_install]
+
+- name: Tune operating system
+  ansible.builtin.import_tasks: system.yml
+  tags: [elasticsearch, elasticsearch_system]
+
+- name: Manage SELinux file contexts
+  ansible.builtin.import_tasks: selinux.yml
+  when:
+    - _es_selinux_manage | bool
+    - _es_selinux_fcontexts | length > 0
+  tags: [elasticsearch, elasticsearch_system]
+
+- name: Install TLS certificates
+  ansible.builtin.import_tasks: certificates.yml
+  tags: [elasticsearch, elasticsearch_tls]
+
+- name: Render configuration
+  ansible.builtin.import_tasks: configure.yml
+  tags: [elasticsearch, elasticsearch_config]
+
+- name: Manage keystore
+  ansible.builtin.import_tasks: keystore.yml
+  tags: [elasticsearch, elasticsearch_keystore]
+
+- name: Manage plugins
+  ansible.builtin.import_tasks: plugins.yml
+  tags: [elasticsearch, elasticsearch_plugins]
+
+- name: Manage GeoIP databases
+  ansible.builtin.import_tasks: geoip.yml
+  when: elasticsearch_geoip_databases | length > 0 or elasticsearch_geoip_databases_purge | bool
+  tags: [elasticsearch, elasticsearch_geoip]
+
+- name: Manage fapolicyd trust
+  ansible.builtin.import_tasks: fapolicyd.yml
+  when:
+    - (elasticsearch_fapolicyd_trust | string | lower) != 'false'
+    - _es_fapolicyd_paths | length > 0
+  tags: [elasticsearch, elasticsearch_plugins]
+
+# Phase 2 - start stopped/new nodes in parallel, then rolling restart of running
+# nodes that need it, orchestrated from a single host.
+- name: Start services
+  ansible.builtin.import_tasks: service.yml
+  tags: [elasticsearch, elasticsearch_service]
+
+- name: Rolling restart
+  ansible.builtin.include_tasks:
+    file: rolling_restart.yml
+    apply:
+      tags: [elasticsearch, elasticsearch_service]
+  when: inventory_hostname == ansible_play_hosts | first
+  tags: [elasticsearch, elasticsearch_service]
+
+# Phase 3 - cluster level configuration through the REST API.
+- name: Wait for cluster and finish bootstrap
+  ansible.builtin.import_tasks: post_start.yml
+  tags: [elasticsearch, elasticsearch_service]
+
+- name: Install license
+  ansible.builtin.import_tasks: license.yml
+  when: elasticsearch_license | length > 0
+  tags: [elasticsearch, elasticsearch_license]
+
+- name: Manage security roles and role mappings
+  ansible.builtin.import_tasks: security.yml
+  tags: [elasticsearch, elasticsearch_security]
+
+- name: Manage GeoIP downloader settings and ingest pipelines
+  ansible.builtin.import_tasks: ingest.yml
+  tags: [elasticsearch, elasticsearch_ingest, elasticsearch_geoip]

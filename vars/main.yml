@@ -1,0 +1,150 @@
+---
+# Internal variables. Everything here is evaluated lazily so secrets are never
+# stored as facts (and never land in a fact cache).
+
+_es_major_version: "{{ elasticsearch_version.split('.')[0] }}"
+_es_repo_name: "elasticsearch-{{ _es_major_version }}.x"
+# Repositories enabled for the role's own dnf tasks (none when repo_source is 'none')
+_es_package_repos: >-
+  {{ [_es_repo_name] if elasticsearch_repo_source == 'elastic'
+     else ([elasticsearch_satellite_repo_id] if elasticsearch_repo_source == 'satellite' else []) }}
+_es_python: "{{ ansible_facts['python']['executable'] | default('/usr/bin/python3') }}"
+_es_tls_dir: "{{ elasticsearch_conf_dir }}/tls"
+_es_keystore_path: "{{ elasticsearch_conf_dir }}/elasticsearch.keystore"
+_es_geoip_dir: "{{ elasticsearch_conf_dir }}/ingest-geoip"
+
+# ---------------------------------------------------------------------------
+# GeoIP
+# ---------------------------------------------------------------------------
+_es_geoip_databases_present: >-
+  {{ elasticsearch_geoip_databases | rejectattr('state', 'defined') | list
+     + (elasticsearch_geoip_databases | selectattr('state', 'defined') | selectattr('state', 'equalto', 'present') | list) }}
+# Nodes the database files are installed on. Removals run on every node, so a
+# node that no longer has the ingest role does not keep stale databases.
+_es_geoip_node: >-
+  {{ ('ingest' in _es_node_roles) or (elasticsearch_geoip_databases_all_nodes | bool) }}
+_es_geoip_databases_install: "{{ _es_geoip_databases_present if _es_geoip_node | bool else [] }}"
+_es_geoip_databases_absent: >-
+  {{ elasticsearch_geoip_databases | selectattr('state', 'defined') | selectattr('state', 'equalto', 'absent') | list }}
+
+# Dynamic cluster settings for the downloader, as the flat string values
+# GET _cluster/settings?flat_settings=true returns, with Elasticsearch's defaults
+# (used when the setting is not set persistently).
+_es_geoip_cluster_settings: >-
+  {{ {'ingest.geoip.downloader.enabled': (elasticsearch_geoip_downloader_enabled | bool | string | lower),
+      'ingest.geoip.downloader.eager.download': (elasticsearch_geoip_downloader_eager_download | bool | string | lower)}
+     | combine({'ingest.geoip.downloader.poll.interval': (elasticsearch_geoip_downloader_poll_interval | string)}
+               if (elasticsearch_geoip_downloader_poll_interval | string | length) > 0 else {}) }}
+_es_geoip_cluster_setting_defaults:
+  ingest.geoip.downloader.enabled: "true"
+  ingest.geoip.downloader.eager.download: "false"
+  ingest.geoip.downloader.poll.interval: "3d"
+
+_es_valid_node_roles:
+  - master
+  - voting_only
+  - data
+  - data_content
+  - data_hot
+  - data_warm
+  - data_cold
+  - data_frozen
+  - ingest
+  - ml
+  - remote_cluster_client
+  - transform
+
+_es_cluster_hosts: "{{ groups[elasticsearch_cluster_group] | default([]) }}"
+
+# Master-eligible hosts from the cluster group, in inventory order. Hosts that
+# do not set elasticsearch_node_roles inherit elasticsearch_default_node_roles.
+_es_master_eligible_hosts: >-
+  {{ _es_cluster_hosts | select('in',
+       (_es_cluster_hosts | map('extract', hostvars)
+         | selectattr('elasticsearch_node_roles', 'defined')
+         | selectattr('elasticsearch_node_roles', 'contains', 'master')
+         | map(attribute='inventory_hostname') | list)
+       + ((_es_cluster_hosts | map('extract', hostvars)
+         | rejectattr('elasticsearch_node_roles', 'defined')
+         | map(attribute='inventory_hostname') | list)
+         if 'master' in elasticsearch_default_node_roles else [])
+     ) | list }}
+
+_es_discovery_type: >-
+  {{ elasticsearch_discovery_type if elasticsearch_discovery_type != 'auto'
+     else ('single-node' if (_es_cluster_hosts | length) == 1 else 'multi-node') }}
+
+_es_cluster_bootstrap: >-
+  {{ (elasticsearch_cluster_bootstrap | bool) if (elasticsearch_cluster_bootstrap | string) != 'auto'
+     else ((ansible_play_hosts | map('extract', hostvars, '_es_has_data') | select | list | length) == 0
+           and (ansible_play_hosts | map('extract', hostvars, '_es_is_running') | select | list | length) == 0) }}
+
+# ---------------------------------------------------------------------------
+# TLS material from the host's ssl_certificates list
+# ---------------------------------------------------------------------------
+# Manually supplied certificates first, then any issued by ansible-role-elastic-tls into
+# elastic_tls_ssl_certificates, so a manual entry always wins when both use one name.
+_es_ssl_certificates: "{{ (ssl_certificates | default([])) + (elastic_tls_ssl_certificates | default([])) }}"
+_es_ssl_entry: >-
+  {{ _es_ssl_certificates
+     | selectattr('name', 'equalto', elasticsearch_ssl_certificate_name)
+     | first | default({}) }}
+_es_ssl_ca_content: "{{ _es_ssl_entry.ca.content | default(elasticsearch_ssl_ca_certificate, true) }}"
+# Path to a CA file already on the host, used when no inline content is given.
+_es_ssl_ca_path: >-
+  {{ '' if (_es_ssl_ca_content | length) > 0
+     else (_es_ssl_entry.ca.path | default(elasticsearch_ssl_ca_certificate_path, true)) }}
+_es_ssl_key_passphrase: "{{ _es_ssl_entry.key.passphrase | default('') }}"
+_es_ad_ca_file: "{{ 'tls/ad-ca.crt' if (elasticsearch_ad_ssl_ca_certificate | length) > 0 else 'tls/ca.crt' }}"
+
+# ---------------------------------------------------------------------------
+# Keystore
+# ---------------------------------------------------------------------------
+# Entries written by the RPM's security auto-configuration. They conflict with
+# the PEM based TLS configuration rendered by this role.
+_es_autoconfig_keystore_entries:
+  - autoconfiguration.password_hash
+  - xpack.security.http.ssl.keystore.secure_password
+  - xpack.security.transport.ssl.keystore.secure_password
+  - xpack.security.transport.ssl.truststore.secure_password
+
+_es_ad_bind_password_setting: "xpack.security.authc.realms.active_directory.{{ elasticsearch_ad_realm_name }}.secure_bind_password"
+
+_es_keystore_desired: >-
+  {{ elasticsearch_keystore_entries
+     | combine({'bootstrap.password': elasticsearch_elastic_password}
+               if not (_es_has_data | bool) else {})
+     | combine({_es_ad_bind_password_setting: elasticsearch_ad_bind_password}
+               if (elasticsearch_ad_enabled | bool) and (elasticsearch_ad_bind_dn | length) > 0 else {})
+     | combine({'xpack.security.http.ssl.secure_key_passphrase': _es_ssl_key_passphrase,
+                'xpack.security.transport.ssl.secure_key_passphrase': _es_ssl_key_passphrase}
+               if (_es_ssl_key_passphrase | length) > 0 else {}) }}
+
+# ---------------------------------------------------------------------------
+# Hardened hosts
+# ---------------------------------------------------------------------------
+_es_selinux_manage: >-
+  {{ (elasticsearch_selinux_manage | string | lower) in ['true', 'yes']
+     or ((elasticsearch_selinux_manage | string | lower) == 'auto'
+         and (ansible_facts['selinux']['status'] | default('disabled')) == 'enabled') }}
+# Only paths that were moved away from their packaged locations need a rule.
+_es_selinux_fcontexts: >-
+  {{ ({elasticsearch_data_path: elasticsearch_selinux_data_type}
+      if elasticsearch_data_path != '/var/lib/elasticsearch' else {})
+     | combine({elasticsearch_log_path: elasticsearch_selinux_log_type}
+               if elasticsearch_log_path != '/var/log/elasticsearch' else {})
+     | combine(elasticsearch_selinux_fcontexts) }}
+
+_es_fapolicyd_paths: >-
+  {{ elasticsearch_fapolicyd_trust_paths if (elasticsearch_fapolicyd_trust_paths | length) > 0
+     else ([elasticsearch_home ~ '/plugins'] if (elasticsearch_plugins | length) > 0 else []) }}
+_es_fapolicyd_trust_file: "/etc/fapolicyd/trust.d/{{ elasticsearch_fapolicyd_trust_file }}"
+_es_fapolicyd_manage: >-
+  {{ (elasticsearch_fapolicyd_trust | string | lower) in ['true', 'yes']
+     or ((elasticsearch_fapolicyd_trust | string | lower) == 'auto'
+         and (_es_fapolicyd_state.stdout | default('') | trim) == 'active') }}
+
+# ---------------------------------------------------------------------------
+# REST API defaults (used through module_defaults)
+# ---------------------------------------------------------------------------
+_es_api_ca_path: "{{ _es_tls_dir }}/ca.crt"

@@ -1,0 +1,11 @@
+---
+- name: Deploy Elasticsearch cluster
+  hosts: elasticsearch
+  become: true
+  gather_facts: true
+  # Stop the whole run if any node fails validation or configuration, before
+  # the role starts restarting other nodes.
+  any_errors_fatal: true
+  # Do NOT set `serial` here - the role performs its own batched rolling restart.
+  roles:
+    - role: elasticsearch

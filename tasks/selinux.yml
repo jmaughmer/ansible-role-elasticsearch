@@ -1,0 +1,53 @@
+---
+# Directories left in their default locations are already labelled correctly by
+# the distribution policy. Ones moved elsewhere (a separate data mount, say) come
+# out as default_t, which a confined service cannot use and which a relabel of
+# the filesystem would not fix. Only relocated paths are managed here.
+- name: SELinux | Verify semanage is available
+  ansible.builtin.stat:
+    path: /usr/sbin/semanage
+  register: _es_semanage
+
+- name: SELinux | Report a missing semanage
+  ansible.builtin.assert:
+    that:
+      - _es_semanage.stat.exists
+    fail_msg: >-
+      SELinux file contexts are managed for {{ _es_selinux_fcontexts.keys() | list | join(', ') }},
+      but /usr/sbin/semanage is not installed on {{ inventory_hostname }}. Install
+      policycoreutils-python-utils, or set elasticsearch_selinux_manage: false.
+    quiet: true
+
+- name: SELinux | Read the local file context rules
+  ansible.builtin.command:
+    cmd: /usr/sbin/semanage fcontext -l -C
+  register: _es_selinux_local
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: SELinux | Define file contexts for relocated directories
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/semanage
+      - fcontext
+      - "{{ '-m' if (_es_selinux_local.stdout | default('')) is search('^' ~ (item.key | regex_escape) ~ '\\(/\\.\\*\\)\\?\\s', multiline=True) else '-a' }}"
+      - -t
+      - "{{ item.value }}"
+      - "{{ item.key }}(/.*)?"
+  loop: "{{ _es_selinux_fcontexts | dict2items }}"
+  loop_control:
+    label: "{{ item.key }} -> {{ item.value }}"
+  register: _es_selinux_fcontext
+  # already defined with this type: semanage reports it and changes nothing
+  when: >-
+    (_es_selinux_local.stdout | default('')) is not search(
+      '^' ~ (item.key | regex_escape) ~ '\(/\.\*\)\?\s.*:' ~ (item.value | regex_escape) ~ ':', multiline=True)
+
+- name: SELinux | Apply the contexts
+  ansible.builtin.command:
+    argv: [/usr/sbin/restorecon, -R, -F, "{{ item.item.key }}"]
+  loop: "{{ _es_selinux_fcontext.results | default([]) | selectattr('changed') | list }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+  changed_when: true

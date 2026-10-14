@@ -1,0 +1,14 @@
+---
+elasticsearch_node_roles: [master, data, ingest, remote_cluster_client]
+elasticsearch_heap_size: "8g"
+
+ssl_certificates:
+  - name: "es-data-3.example.com"
+    certificate:
+      content: |
+        -----BEGIN CERTIFICATE-----
+        REPLACE-WITH-NODE-CERTIFICATE
+        -----END CERTIFICATE-----
+    key:
+      content: |
+        REPLACE-WITH-VAULTED-PRIVATE-KEY

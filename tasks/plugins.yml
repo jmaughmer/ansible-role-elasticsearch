@@ -1,0 +1,14 @@
+---
+# Running nodes with a pending version upgrade get their plugins reinstalled
+# during the rolling upgrade instead (plugins must match the ES version).
+- name: Plugins | Synchronise plugins
+  ansible.builtin.include_tasks: plugins_sync.yml
+  vars:
+    _es_plugin_host: "{{ inventory_hostname }}"
+    _es_plugin_reinstall: "{{ _es_upgraded_offline | bool }}"
+  when: not (_es_upgrade_pending | bool)
+
+- name: Plugins | Flag restart for plugin changes
+  ansible.builtin.set_fact:
+    _es_restart_required: true
+  when: _es_plugins_changed | default(false) | bool

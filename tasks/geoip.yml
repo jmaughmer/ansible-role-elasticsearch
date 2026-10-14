@@ -1,0 +1,80 @@
+---
+# Databases in <conf>/ingest-geoip are read by the geoip and ip_location
+# processors. Elasticsearch watches the directory and loads, reloads and unloads
+# .mmdb files on its own, so changes normally need no restart
+# (elasticsearch_geoip_restart_on_change). Files are transferred to a temporary
+# location first and moved into place when complete.
+#
+# Files are installed on nodes with the ingest role (or on every node with
+# elasticsearch_geoip_databases_all_nodes); removals run everywhere.
+- name: GeoIP | Create database directory
+  ansible.builtin.file:
+    path: "{{ _es_geoip_dir }}"
+    state: directory
+    owner: root
+    group: elasticsearch
+    mode: "0750"
+  when: _es_geoip_node | bool
+
+# Only transferred when the checksum differs from the file on the node
+- name: GeoIP | Copy databases from the control node
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ _es_geoip_dir }}/{{ item.name }}"
+    owner: root
+    group: elasticsearch
+    mode: "0640"
+  loop: "{{ _es_geoip_databases_install | selectattr('src', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _es_geoip_copied
+  until: _es_geoip_copied is not failed
+  retries: "{{ elasticsearch_task_retries }}"
+  delay: "{{ elasticsearch_task_delay }}"
+
+# Without a checksum an existing file is kept; with one, a different file is replaced.
+- name: GeoIP | Download databases
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ _es_geoip_dir }}/{{ item.name }}"
+    checksum: "{{ item.checksum | default(omit) }}"
+    owner: root
+    group: elasticsearch
+    mode: "0640"
+    timeout: "{{ elasticsearch_api_timeout }}"
+  loop: "{{ _es_geoip_databases_install | selectattr('url', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  async: "{{ 0 if ansible_check_mode else elasticsearch_download_async_timeout }}"
+  poll: "{{ elasticsearch_download_async_poll }}"
+  register: _es_geoip_downloaded
+  until: _es_geoip_downloaded is not failed
+  retries: "{{ elasticsearch_task_retries }}"
+  delay: "{{ elasticsearch_task_delay }}"
+
+- name: GeoIP | Find installed databases
+  ansible.builtin.find:
+    paths: "{{ _es_geoip_dir }}"
+    patterns: "*.mmdb"
+    file_type: file
+  register: _es_geoip_installed
+  when: elasticsearch_geoip_databases_purge | bool
+
+- name: GeoIP | Remove databases
+  ansible.builtin.file:
+    path: "{{ _es_geoip_dir }}/{{ item }}"
+    state: absent
+  loop: >-
+    {{ ((_es_geoip_databases_absent | map(attribute='name') | list)
+        + ((_es_geoip_installed.files | default([]) | map(attribute='path') | map('basename') | list
+            | difference(_es_geoip_databases_install | map(attribute='name') | list))
+           if elasticsearch_geoip_databases_purge | bool else []))
+       | unique }}
+  register: _es_geoip_removed
+
+- name: GeoIP | Flag restart for database changes
+  ansible.builtin.set_fact:
+    _es_restart_required: true
+  when:
+    - elasticsearch_geoip_restart_on_change | bool
+    - _es_geoip_copied is changed or _es_geoip_downloaded is changed or _es_geoip_removed is changed

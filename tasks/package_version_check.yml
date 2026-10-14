@@ -1,0 +1,34 @@
+---
+# Runs only when a package install or upgrade is about to happen. Confirms the
+# pinned version exists in the package source before anything is changed; with
+# Satellite this catches content views that were not published or promoted.
+- name: Install | Query available Elasticsearch versions
+  ansible.builtin.command:
+    argv: >-
+      {{ ['dnf', '-q', 'repoquery', '--qf', '%{version}']
+         + ((['--disablerepo=*'] + (_es_package_repos | map('regex_replace', '^', '--enablerepo=') | list))
+            if _es_package_repos | length > 0 else [])
+         + ['elasticsearch'] }}
+  register: _es_available_versions
+  until: _es_available_versions is not failed
+  retries: "{{ elasticsearch_task_retries }}"
+  delay: "{{ elasticsearch_task_delay }}"
+  changed_when: false
+  check_mode: false
+
+- name: Install | Verify the requested Elasticsearch version is available
+  vars:
+    _es_versions: >-
+      {{ _es_available_versions.stdout_lines | map('trim') | select('match', '^[0-9]') | unique | list }}
+  ansible.builtin.assert:
+    that:
+      - elasticsearch_version in _es_versions
+    fail_msg: >-
+      elasticsearch {{ elasticsearch_version }} is not available from
+      {{ {'elastic': 'repository ' ~ _es_repo_name,
+          'satellite': 'Satellite repository ' ~ elasticsearch_satellite_repo_id,
+          'none': 'the enabled repositories'}[elasticsearch_repo_source] }} on {{ inventory_hostname }}
+      (available: {{ (_es_versions | sort | join(', ')) or 'none' }}).
+      {% if elasticsearch_repo_source == 'satellite' %}Sync the repository, then publish and promote a
+      content view version that includes it to this host's lifecycle environment.{% endif %}
+    quiet: true

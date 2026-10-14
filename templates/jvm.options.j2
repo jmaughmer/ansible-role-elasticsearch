@@ -1,0 +1,10 @@
+# {{ ansible_managed }}
+{% if (elasticsearch_heap_size | string) != 'auto' %}
+-Xms{{ elasticsearch_heap_size }}
+-Xmx{{ elasticsearch_heap_size }}
+{% else %}
+# Heap size is chosen automatically by Elasticsearch.
+{% endif %}
+{% for option in elasticsearch_jvm_options %}
+{{ option }}
+{% endfor %}

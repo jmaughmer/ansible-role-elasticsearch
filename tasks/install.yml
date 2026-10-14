@@ -1,0 +1,46 @@
+---
+- name: Install | Check the package source provides the requested version
+  ansible.builtin.import_tasks: package_version_check.yml
+  when:
+    - elasticsearch_package_version_check | bool
+    - _es_installed_version != elasticsearch_version
+
+# Package downloads run as async jobs so a dropped SSH session does not abort
+# them, and are retried if the download itself fails.
+- name: Install | Install Elasticsearch package
+  ansible.builtin.dnf:
+    name: "elasticsearch-{{ elasticsearch_version }}"
+    state: present
+    lock_timeout: "{{ elasticsearch_dnf_lock_timeout }}"
+    enablerepo: "{{ _es_package_repos if _es_package_repos | length > 0 else omit }}"
+  async: "{{ 0 if ansible_check_mode else elasticsearch_download_async_timeout }}"
+  poll: "{{ elasticsearch_download_async_poll }}"
+  register: _es_package_install
+  until: _es_package_install is not failed
+  retries: "{{ elasticsearch_task_retries }}"
+  delay: "{{ elasticsearch_task_delay }}"
+  when: _es_installed_version | length == 0
+
+# A node that is installed but not running can be upgraded in place. Running
+# nodes are upgraded one batch at a time by rolling_restart_batch.yml.
+- name: Install | Upgrade Elasticsearch package on a stopped node
+  ansible.builtin.dnf:
+    name: "elasticsearch-{{ elasticsearch_version }}"
+    state: present
+    allow_downgrade: false
+    lock_timeout: "{{ elasticsearch_dnf_lock_timeout }}"
+    enablerepo: "{{ _es_package_repos if _es_package_repos | length > 0 else omit }}"
+  async: "{{ 0 if ansible_check_mode else elasticsearch_download_async_timeout }}"
+  poll: "{{ elasticsearch_download_async_poll }}"
+  register: _es_package_upgrade
+  until: _es_package_upgrade is not failed
+  retries: "{{ elasticsearch_task_retries }}"
+  delay: "{{ elasticsearch_task_delay }}"
+  when:
+    - _es_version_changing | bool
+    - not (_es_is_running | bool)
+
+- name: Install | Record package state
+  ansible.builtin.set_fact:
+    _es_upgraded_offline: "{{ _es_package_upgrade is changed }}"
+    _es_upgrade_pending: "{{ (_es_version_changing | bool) and (_es_is_running | bool) }}"

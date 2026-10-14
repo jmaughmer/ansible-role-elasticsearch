@@ -1,0 +1,5 @@
+---
+# EXAMPLE ONLY - replace the values and encrypt this file:
+#   ansible-vault encrypt inventory/group_vars/elasticsearch/vault.yml
+vault_elasticsearch_elastic_password: "CHANGE-ME-elastic-password"
+vault_elasticsearch_ad_bind_password: "CHANGE-ME-ad-bind-password"

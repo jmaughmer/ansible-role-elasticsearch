@@ -1,0 +1,117 @@
+---
+elasticsearch_version: "9.5.4"
+
+# ------------------------------------------------------------------ package source
+# Default: Elastic's public repository. To install from Red Hat Satellite / Katello:
+# elasticsearch_repo_source: satellite
+# elasticsearch_satellite_repo_id: ACME_Elastic_Elastic_9_x    # subscription-manager repos --list
+# elasticsearch_satellite_repo_state: disabled                 # keep `dnf update` from upgrading Elasticsearch
+
+elasticsearch_cluster_name: prod-search
+elasticsearch_cluster_group: elasticsearch
+
+# Secrets live in vault.yml (encrypt it with ansible-vault)
+elasticsearch_elastic_password: "{{ vault_elasticsearch_elastic_password }}"
+
+# ------------------------------------------------------------------ TLS
+# CA that issued the certificates in each host's ssl_certificates list
+elasticsearch_ssl_ca_certificate: |
+  -----BEGIN CERTIFICATE-----
+  REPLACE-WITH-ISSUING-CA-CERTIFICATE
+  -----END CERTIFICATE-----
+
+# ------------------------------------------------------------------ license
+# Contents of the license file downloaded from Elastic (vault it if preferred)
+# elasticsearch_license: "{{ lookup('ansible.builtin.file', 'files/license.json') }}"
+elasticsearch_license: ""
+
+# ------------------------------------------------------------------ plugins
+elasticsearch_plugins:
+  - mapper-size
+
+# ------------------------------------------------------------------ GeoIP / ingest pipelines
+# Nodes download the GeoLite2 databases from geoip.elastic.co by default. Without
+# internet access, disable the downloader and ship the databases instead:
+# elasticsearch_geoip_downloader_enabled: false
+# elasticsearch_geoip_databases:
+#   - name: GeoLite2-City.mmdb
+#     url: https://repo.example.com/geoip/GeoLite2-City.mmdb
+#     checksum: "sha256:REPLACE-WITH-SHA256"
+elasticsearch_ingest_pipelines:
+  - name: geoip-source
+    definition:
+      description: Add source.geo and source.as from source.ip
+      processors:
+        - geoip:
+            field: source.ip
+            target_field: source.geo
+            ignore_missing: true
+        - geoip:
+            field: source.ip
+            target_field: source.as
+            database_file: GeoLite2-ASN.mmdb
+            properties: [asn, organization_name]
+            ignore_missing: true
+
+# ------------------------------------------------------------------ restarts
+elasticsearch_rolling_restart_batch_size: 1
+elasticsearch_rolling_restart_master_batch_size: 1
+
+# ------------------------------------------------------------------ Active Directory
+elasticsearch_ad_enabled: true
+elasticsearch_ad_realm_name: corp_ad
+elasticsearch_ad_domain_name: example.com
+elasticsearch_ad_urls:
+  - ldaps://dc1.example.com:636
+  - ldaps://dc2.example.com:636
+elasticsearch_ad_bind_dn: svc-elasticsearch@example.com
+elasticsearch_ad_bind_password: "{{ vault_elasticsearch_ad_bind_password }}"
+elasticsearch_ad_user_search_base_dn: "OU=Users,DC=example,DC=com"
+elasticsearch_ad_group_search_base_dn: "OU=Groups,DC=example,DC=com"
+# CA of the domain controllers' LDAPS certificates (omit to reuse the CA above)
+elasticsearch_ad_ssl_ca_certificate: ""
+
+# ------------------------------------------------------------------ roles
+elasticsearch_security_roles:
+  - name: logs_reader
+    definition:
+      cluster: [monitor]
+      indices:
+        - names: ["logs-*"]
+          privileges: [read, view_index_metadata]
+
+  - name: app_writer
+    definition:
+      cluster: [monitor]
+      indices:
+        - names: ["app-*"]
+          privileges: [create_doc, create_index, view_index_metadata]
+
+  # For Logstash's elasticsearch output (logstash_internal user), e.g. the
+  # example pipelines in ansible-role-logstash
+  - name: logstash_writer
+    definition:
+      cluster: [monitor, manage_index_templates, manage_ilm]
+      indices:
+        - names: ["logs-*", "metrics-*"]
+          privileges: [create_doc, create_index, auto_configure, view_index_metadata]
+
+# ------------------------------------------------------------------ role mappings
+elasticsearch_security_role_mappings:
+  - name: corp_ad_admins
+    definition:
+      enabled: true
+      roles: [superuser]
+      rules:
+        all:
+          - field: { realm.name: corp_ad }
+          - field: { groups: "CN=ES-Admins,OU=Groups,DC=example,DC=com" }
+
+  - name: corp_ad_log_readers
+    definition:
+      enabled: true
+      roles: [logs_reader, kibana_admin]
+      rules:
+        all:
+          - field: { realm.name: corp_ad }
+          - field: { groups: "CN=ES-Log-Readers,OU=Groups,DC=example,DC=com" }

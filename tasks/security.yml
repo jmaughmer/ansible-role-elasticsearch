@@ -1,0 +1,121 @@
+---
+# Roles and role mappings are stored in the cluster, so they are managed once
+# through the REST API. Each object carries a hash of its definition in
+# metadata.ansible_managed_hash (SHA-256), which keeps runs idempotent without having to
+# compare against the server-side defaults Elasticsearch adds.
+#
+# Every call is retried; all of them are safe to repeat (DELETE accepts 404 in
+# case an earlier attempt succeeded but its response was lost).
+- name: Security | Manage roles and role mappings
+  run_once: true
+  module_defaults:
+    ansible.builtin.uri:
+      url_username: elastic
+      url_password: "{{ elasticsearch_elastic_password }}"
+      force_basic_auth: true
+      ca_path: "{{ _es_api_ca_path }}"
+      validate_certs: "{{ elasticsearch_api_validate_certs | bool }}"
+      body_format: json
+      timeout: "{{ elasticsearch_api_timeout }}"
+  block:
+    # ------------------------------------------------------------------ roles
+    - name: Security | Read existing roles
+      ansible.builtin.uri:
+        url: "{{ _es_api_url }}/_security/role/{{ item.name | urlencode }}"
+        status_code: [200, 404]
+      loop: "{{ elasticsearch_security_roles }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: _es_roles_current
+      until: _es_roles_current is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+
+    - name: Security | Create or update roles
+      ansible.builtin.uri:
+        url: "{{ _es_api_url }}/_security/role/{{ item.item.name | urlencode }}"
+        method: PUT
+        body: >-
+          {{ item.item.definition | combine({'metadata': (item.item.definition.metadata | default({}))
+                                              | combine({'ansible_managed_hash': _es_hash})}) }}
+      vars:
+        _es_hash: "{{ item.item.definition | default({}) | to_json(sort_keys=true) | hash('sha256') }}"
+      loop: "{{ _es_roles_current.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when:
+        - (item.item.state | default('present')) == 'present'
+        - item.status == 404 or (item.json[item.item.name].metadata.ansible_managed_hash | default('')) != _es_hash
+      register: _es_roles_put
+      until: _es_roles_put is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+      changed_when: true
+
+    - name: Security | Delete roles
+      ansible.builtin.uri:
+        url: "{{ _es_api_url }}/_security/role/{{ item.item.name | urlencode }}"
+        method: DELETE
+        status_code: [200, 404]
+      loop: "{{ _es_roles_current.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when:
+        - (item.item.state | default('present')) == 'absent'
+        - item.status == 200
+      register: _es_roles_delete
+      until: _es_roles_delete is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+      changed_when: true
+
+    # ---------------------------------------------------------- role mappings
+    - name: Security | Read existing role mappings
+      ansible.builtin.uri:
+        url: "{{ _es_api_url }}/_security/role_mapping/{{ item.name | urlencode }}"
+        status_code: [200, 404]
+      loop: "{{ elasticsearch_security_role_mappings }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: _es_role_mappings_current
+      until: _es_role_mappings_current is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+
+    - name: Security | Create or update role mappings
+      ansible.builtin.uri:
+        url: "{{ _es_api_url }}/_security/role_mapping/{{ item.item.name | urlencode }}"
+        method: PUT
+        body: >-
+          {{ item.item.definition | combine({'metadata': (item.item.definition.metadata | default({}))
+                                              | combine({'ansible_managed_hash': _es_hash})}) }}
+      vars:
+        _es_hash: "{{ item.item.definition | default({}) | to_json(sort_keys=true) | hash('sha256') }}"
+      loop: "{{ _es_role_mappings_current.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when:
+        - (item.item.state | default('present')) == 'present'
+        - item.status == 404 or (item.json[item.item.name].metadata.ansible_managed_hash | default('')) != _es_hash
+      register: _es_role_mappings_put
+      until: _es_role_mappings_put is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+      changed_when: true
+
+    - name: Security | Delete role mappings
+      ansible.builtin.uri:
+        url: "{{ _es_api_url }}/_security/role_mapping/{{ item.item.name | urlencode }}"
+        method: DELETE
+        status_code: [200, 404]
+      loop: "{{ _es_role_mappings_current.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when:
+        - (item.item.state | default('present')) == 'absent'
+        - item.status == 200
+      register: _es_role_mappings_delete
+      until: _es_role_mappings_delete is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+      changed_when: true

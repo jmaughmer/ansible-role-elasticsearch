@@ -1,0 +1,49 @@
+---
+- name: Facts | Gather minimal system facts
+  ansible.builtin.setup:
+    gather_subset: [min]
+  register: _es_setup
+  until: _es_setup is not failed
+  retries: "{{ elasticsearch_task_retries }}"
+  delay: "{{ elasticsearch_task_delay }}"
+  when: ansible_facts['os_family'] is not defined
+
+- name: Facts | Query installed Elasticsearch package version
+  ansible.builtin.command:
+    cmd: rpm -q --queryformat '%{VERSION}' elasticsearch
+  register: _es_rpm_query
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Facts | Query Elasticsearch service state
+  ansible.builtin.command:
+    cmd: systemctl is-active elasticsearch
+  register: _es_service_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Facts | Check for existing node data
+  ansible.builtin.stat:
+    path: "{{ elasticsearch_data_path }}/_state"
+  register: _es_state_dir
+
+- name: Facts | Set node facts
+  ansible.builtin.set_fact:
+    _es_installed_version: "{{ (_es_rpm_query.stdout | trim) if _es_rpm_query.rc == 0 else '' }}"
+    _es_is_running: "{{ (_es_service_state.stdout | trim) == 'active' }}"
+    _es_has_data: "{{ _es_state_dir.stat.exists }}"
+    _es_node_name: "{{ elasticsearch_node_name | default(inventory_hostname) }}"
+    _es_node_roles: "{{ elasticsearch_node_roles | default(elasticsearch_default_node_roles) }}"
+    _es_target_version: "{{ elasticsearch_version }}"
+    _es_plugins_raw: "{{ elasticsearch_plugins }}"
+    _es_api_url: "https://{{ elasticsearch_api_host }}:{{ elasticsearch_http_port }}"
+    _es_restart_required: false
+    _es_upgraded_offline: false
+    _es_upgrade_pending: false
+
+- name: Facts | Derive role and version facts
+  ansible.builtin.set_fact:
+    _es_is_master_eligible: "{{ 'master' in _es_node_roles }}"
+    _es_version_changing: "{{ (_es_installed_version | length) > 0 and _es_installed_version != elasticsearch_version }}"

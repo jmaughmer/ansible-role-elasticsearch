@@ -1,0 +1,284 @@
+---
+- name: Preflight | Verify operating system is supported
+  ansible.builtin.assert:
+    that:
+      - elasticsearch_supported_distributions is sequence
+      - elasticsearch_supported_distributions is not string
+      - ansible_facts['os_family'] == 'RedHat'
+      - ansible_facts['distribution'] in elasticsearch_supported_distributions
+      - ansible_facts['distribution_major_version'] in ['9', '10']
+    fail_msg: >-
+      Unsupported platform {{ ansible_facts['distribution'] }}
+      {{ ansible_facts['distribution_version'] }}. Supported: major version 9 or 10 of
+      {{ elasticsearch_supported_distributions | join(', ') }} (elasticsearch_supported_distributions).
+    quiet: true
+
+- name: Preflight | Verify the play is not serialized
+  ansible.builtin.assert:
+    that:
+      - ansible_play_hosts | difference(ansible_play_batch) | length == 0
+    fail_msg: >-
+      Do not use `serial` on plays that apply this role. The role coordinates
+      restarts across the whole play itself (see elasticsearch_rolling_restart_batch_size).
+    quiet: true
+  run_once: true
+
+- name: Preflight | Verify host is a member of the cluster group
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname in _es_cluster_hosts
+    fail_msg: "{{ inventory_hostname }} is not in inventory group '{{ elasticsearch_cluster_group }}'."
+    quiet: true
+
+- name: Preflight | Verify Elasticsearch version
+  ansible.builtin.assert:
+    that:
+      - elasticsearch_version is match('^9[.][0-9]+[.][0-9]+$')
+      - _es_installed_version == '' or _es_installed_version is version(elasticsearch_version, '<=')
+      - _es_installed_version == '' or _es_installed_version.split('.')[0] == _es_major_version
+    fail_msg: >-
+      elasticsearch_version must be an exact 9.x.y release, downgrades are not
+      supported and major upgrades must be done manually
+      (installed: '{{ _es_installed_version }}', requested: '{{ elasticsearch_version }}').
+    quiet: true
+
+- name: Preflight | Verify package source settings
+  ansible.builtin.assert:
+    that:
+      - elasticsearch_manage_repo is not defined
+      - elasticsearch_repo_source in ['elastic', 'satellite', 'none']
+      - elasticsearch_repo_source != 'satellite' or elasticsearch_satellite_repo_id | length > 0
+      - elasticsearch_satellite_repo_state in ['unmanaged', 'enabled', 'disabled']
+      - elasticsearch_satellite_repo_overrides is mapping
+      - elasticsearch_satellite_repo_overrides.keys() | map('lower') | intersect(['enabled', 'baseurl', 'name']) | length == 0
+    fail_msg: >-
+      elasticsearch_repo_source must be elastic, satellite or none (elasticsearch_manage_repo was replaced:
+      use elasticsearch_repo_source: none instead of false). Satellite needs elasticsearch_satellite_repo_id;
+      elasticsearch_satellite_repo_state must be unmanaged, enabled or disabled; and
+      elasticsearch_satellite_repo_overrides cannot set enabled (use the state setting), baseurl or name.
+    quiet: true
+
+- name: Preflight | Verify elastic user password
+  ansible.builtin.assert:
+    that:
+      - elasticsearch_elastic_password is defined
+      - elasticsearch_elastic_password | length >= 6
+    fail_msg: elasticsearch_elastic_password must be defined (vaulted) and at least 6 characters.
+    quiet: true
+  no_log: "{{ elasticsearch_no_log }}"
+
+- name: Preflight | Verify node roles
+  ansible.builtin.assert:
+    that:
+      - _es_node_roles is sequence
+      - _es_node_roles is not string
+      - _es_node_roles | difference(_es_valid_node_roles) | length == 0
+    fail_msg: >-
+      Invalid elasticsearch_node_roles {{ _es_node_roles }}. Valid roles:
+      {{ _es_valid_node_roles | join(', ') }}.
+    quiet: true
+
+- name: Preflight | Verify JVM heap size
+  ansible.builtin.assert:
+    that:
+      - (elasticsearch_heap_size | string) is match('^(auto|[0-9]+[mMgG])$')
+    fail_msg: "elasticsearch_heap_size must be 'auto' or a size such as '4g' / '8192m' (got '{{ elasticsearch_heap_size }}')."
+    quiet: true
+
+- name: Preflight | Verify TLS material for this node
+  ansible.builtin.assert:
+    that:
+      - _es_ssl_entry | length > 0
+      - _es_ssl_entry.certificate.content is defined or _es_ssl_entry.certificate.path is defined
+      - _es_ssl_entry.key.content is defined or _es_ssl_entry.key.path is defined
+      - (_es_ssl_ca_content | length) > 0 or (_es_ssl_ca_path | length) > 0
+    fail_msg: >-
+      No usable entry named '{{ elasticsearch_ssl_certificate_name }}' in ssl_certificates or
+      elastic_tls_ssl_certificates (each needs certificate and key, as content or path), or no CA
+      certificate was provided via elasticsearch_ssl_ca_certificate,
+      elasticsearch_ssl_ca_certificate_path or the entry's ca.
+    quiet: true
+  no_log: "{{ elasticsearch_no_log }}"
+
+- name: Preflight | Verify firewall settings
+  ansible.builtin.assert:
+    that:
+      - elasticsearch_firewall_ports is sequence
+      - elasticsearch_firewall_ports is not string
+      - elasticsearch_firewall_services is sequence
+      - elasticsearch_firewall_services is not string
+      - elasticsearch_firewall_ports | reject('match', '^[0-9]+(-[0-9]+)?/(tcp|udp)$') | list | length == 0
+    fail_msg: >-
+      elasticsearch_firewall_ports entries must look like 514/udp, 5044/tcp or 5000-5010/tcp
+      (got {{ elasticsearch_firewall_ports }}), and elasticsearch_firewall_services must be a list of
+      firewalld service names.
+    quiet: true
+
+- name: Preflight | Verify hardening settings
+  ansible.builtin.assert:
+    that:
+      - (elasticsearch_selinux_manage | string | lower) in ['auto', 'true', 'false', 'yes', 'no']
+      - (elasticsearch_fapolicyd_trust | string | lower) in ['auto', 'true', 'false', 'yes', 'no']
+      - elasticsearch_selinux_fcontexts is mapping
+      - elasticsearch_fapolicyd_trust_paths is sequence
+      - elasticsearch_fapolicyd_trust_paths is not string
+      - >-
+        not (elasticsearch_fips_mode | bool)
+        or (elasticsearch_password_hashing_algorithm | lower) is match('^pbkdf2')
+    fail_msg: >-
+      elasticsearch_selinux_manage and elasticsearch_fapolicyd_trust must be auto, true or false;
+      elasticsearch_selinux_fcontexts must be a mapping and elasticsearch_fapolicyd_trust_paths a
+      list. With elasticsearch_fips_mode, elasticsearch_password_hashing_algorithm must be a pbkdf2
+      variant such as pbkdf2_stretch, because bcrypt is not FIPS approved.
+    quiet: true
+
+- name: Preflight | Explain what Elasticsearch FIPS mode still needs
+  ansible.builtin.debug:
+    msg: >-
+      elasticsearch_fips_mode is on. Elasticsearch also needs a FIPS certified security provider
+      (for example Bouncy Castle FIPS) added to its bundled JDK, and a Platinum, Enterprise or trial
+      license. This role configures neither; the nodes will refuse to start without them.
+  when: elasticsearch_fips_mode | bool
+  run_once: true
+
+# The traditional encrypted PEM format derives its key with MD5, which a host
+# running in FIPS mode cannot use.
+- name: Preflight | Verify the private key can be read in FIPS mode
+  ansible.builtin.assert:
+    that:
+      - >-
+        _es_ssl_entry.key.content is not defined
+        or _es_ssl_entry.key.content is not search('Proc-Type: 4,ENCRYPTED')
+    fail_msg: >-
+      The private key for '{{ elasticsearch_ssl_certificate_name }}' is in the traditional encrypted
+      PEM format (Proc-Type: 4,ENCRYPTED), whose key derivation uses MD5, and this host runs in FIPS
+      mode. Convert it first: openssl pkcs8 -topk8 -in old.key -out new.key
+    quiet: true
+  when: ansible_facts['fips'] | default(false) | bool
+  no_log: "{{ elasticsearch_no_log }}"
+
+- name: Preflight | Verify Active Directory settings
+  ansible.builtin.assert:
+    that:
+      - elasticsearch_ad_domain_name | length > 0
+      - elasticsearch_ad_urls | length > 0
+      - elasticsearch_ad_bind_dn | length == 0 or elasticsearch_ad_bind_password | length > 0
+    fail_msg: >-
+      Active Directory is enabled: elasticsearch_ad_domain_name and elasticsearch_ad_urls are
+      required, and elasticsearch_ad_bind_password is required when elasticsearch_ad_bind_dn is set.
+    quiet: true
+  when: elasticsearch_ad_enabled | bool
+  no_log: "{{ elasticsearch_no_log }}"
+
+- name: Preflight | Verify plugin definitions
+  ansible.builtin.assert:
+    that:
+      - item is string or (item is mapping and item.name is defined)
+    fail_msg: "Plugins must be a name string or a dict with at least 'name' (and optional 'source')."
+    quiet: true
+  loop: "{{ elasticsearch_plugins }}"
+  loop_control:
+    label: "{{ item.name | default(item) }}"
+
+- name: Preflight | Verify security role and role mapping definitions
+  ansible.builtin.assert:
+    that:
+      - item.name is defined
+      - (item.state | default('present')) in ['present', 'absent']
+      - (item.state | default('present')) == 'absent' or item.definition is mapping
+    fail_msg: "Each role / role mapping needs a name, a state of present/absent and a definition dict."
+    quiet: true
+  loop: "{{ elasticsearch_security_roles + elasticsearch_security_role_mappings }}"
+  loop_control:
+    label: "{{ item.name | default('unnamed') }}"
+  run_once: true
+
+- name: Preflight | Verify GeoIP settings
+  ansible.builtin.assert:
+    that:
+      - elasticsearch_geoip_downloader_poll_interval | string is match('^([0-9]+(ms|s|m|h|d))?$')
+      - elasticsearch_geoip_databases is sequence
+      - elasticsearch_geoip_databases is not string
+    fail_msg: >-
+      elasticsearch_geoip_downloader_poll_interval must be empty or a time value such as 3d
+      (got '{{ elasticsearch_geoip_downloader_poll_interval }}'), and elasticsearch_geoip_databases
+      must be a list.
+    quiet: true
+  run_once: true
+
+- name: Preflight | Verify GeoIP database definitions
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.name is defined
+      - item.name is match('^[A-Za-z0-9][A-Za-z0-9._-]*[.]mmdb$')
+      - (item.state | default('present')) in ['present', 'absent']
+      - >-
+        (item.state | default('present')) == 'absent'
+        or ((item.src is defined) != (item.url is defined))
+      - item.checksum is not defined or item.url is defined
+    fail_msg: >-
+      Each GeoIP database needs a file name ending in .mmdb (no directories), a state of
+      present/absent, and exactly one of src or url when present (checksum only with url).
+    quiet: true
+  loop: "{{ elasticsearch_geoip_databases }}"
+  loop_control:
+    label: "{{ item.name | default('unnamed') }}"
+  run_once: true
+
+- name: Preflight | Warn about GeoIP databases the downloader overrides
+  ansible.builtin.debug:
+    msg: >-
+      {{ _es_geoip_default_names | join(', ') }} from elasticsearch_geoip_databases have the same name as
+      databases the GeoIP downloader provides, and Elasticsearch uses the downloaded copies. Set
+      elasticsearch_geoip_downloader_enabled: false to use these files.
+  vars:
+    _es_geoip_default_names: >-
+      {{ _es_geoip_databases_present | map(attribute='name') | list
+         | intersect(['GeoLite2-City.mmdb', 'GeoLite2-Country.mmdb', 'GeoLite2-ASN.mmdb']) }}
+  when:
+    - elasticsearch_geoip_downloader_enabled | bool
+    - _es_geoip_default_names | length > 0
+  run_once: true
+
+- name: Preflight | Verify ingest pipeline definitions
+  ansible.builtin.assert:
+    that:
+      - item.name is defined
+      - item.name is not match('.*[*,/ ].*')
+      - (item.state | default('present')) in ['present', 'absent']
+      - (item.state | default('present')) == 'absent' or item.definition is mapping
+    fail_msg: >-
+      Each ingest pipeline needs a name (without *, commas, slashes or spaces), a state of
+      present/absent and a definition dict.
+    quiet: true
+  loop: "{{ elasticsearch_ingest_pipelines }}"
+  loop_control:
+    label: "{{ item.name | default('unnamed') }}"
+  run_once: true
+
+- name: Preflight | Verify cluster topology and restart batch sizes
+  ansible.builtin.assert:
+    that:
+      - _es_master_eligible_hosts | length > 0
+      - elasticsearch_rolling_restart_batch_size | int >= 1
+      - elasticsearch_rolling_restart_master_batch_size | int >= 1
+      - >-
+        (_es_master_eligible_hosts | length) < 3 or
+        (elasticsearch_rolling_restart_master_batch_size | int) < ((_es_master_eligible_hosts | length) / 2)
+    fail_msg: >-
+      The cluster group needs at least one master-eligible node, batch sizes must be >= 1, and
+      elasticsearch_rolling_restart_master_batch_size ({{ elasticsearch_rolling_restart_master_batch_size }})
+      must be less than half of the {{ _es_master_eligible_hosts | length }} master-eligible nodes
+      so the cluster keeps quorum during restarts.
+    quiet: true
+  run_once: true
+
+- name: Preflight | Warn about cluster with two master-eligible nodes
+  ansible.builtin.debug:
+    msg: >-
+      The cluster has exactly two master-eligible nodes. It cannot tolerate the loss of
+      either one, so the cluster will be unavailable while the elected master restarts.
+      Add a third master-eligible (or voting_only) node.
+  when: _es_master_eligible_hosts | length == 2
+  run_once: true

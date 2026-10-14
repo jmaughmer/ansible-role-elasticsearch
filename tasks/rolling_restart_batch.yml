@@ -1,0 +1,194 @@
+---
+# Restarts (and, if pending, upgrades) the nodes in _es_batch.
+- name: "Rolling restart | Batch {{ _es_batch_index + 1 }}/{{ _es_roll_batches | length }}: {{ _es_batch | join(', ') }}"
+  vars:
+    # Prefer a node outside this batch for API calls so it stays reachable
+    # while the batch is down; fall back to the batch itself (e.g. single node).
+    _es_batch_api_host: "{{ ansible_play_hosts | reject('in', _es_batch) | first | default(_es_batch | first, true) }}"
+    _es_batch_api_url: "{{ hostvars[_es_batch_api_host]._es_api_url }}"
+    _es_batch_node_names: "{{ _es_batch | map('extract', hostvars, '_es_node_name') | list }}"
+    _es_batch_upgrades: >-
+      {{ _es_batch | map('extract', hostvars) | selectattr('_es_upgrade_pending')
+         | map(attribute='inventory_hostname') | list }}
+    # During a rolling upgrade, replicas of primaries on upgraded nodes cannot be
+    # allocated to nodes still on the old version, so the cluster may not reach
+    # green until the last batch. Between batches of an upgrade the role waits for
+    # yellow with no initializing/relocating shards, as Elastic recommends.
+    _es_roll_is_upgrade: >-
+      {{ (ansible_play_hosts | map('extract', hostvars) | selectattr('_es_upgrade_pending') | list | length) > 0 }}
+    _es_batch_status_before: >-
+      {{ 'yellow' if ((_es_roll_is_upgrade | bool) and _es_batch_index > 0) else elasticsearch_cluster_health_status }}
+    _es_batch_status_after: >-
+      {{ 'yellow' if ((_es_roll_is_upgrade | bool) and (_es_batch_index + 1) < (_es_roll_batches | length))
+         else elasticsearch_cluster_health_status }}
+    _es_batch_health_params: >-
+      {{ '&wait_for_no_initializing_shards=true'
+         ~ ('&wait_for_no_relocating_shards=true' if (_es_roll_is_upgrade | bool) else '') }}
+  module_defaults:
+    ansible.builtin.uri:
+      url_username: elastic
+      url_password: "{{ elasticsearch_elastic_password }}"
+      force_basic_auth: true
+      ca_path: "{{ _es_api_ca_path }}"
+      validate_certs: "{{ elasticsearch_api_validate_certs | bool }}"
+      body_format: json
+      timeout: "{{ elasticsearch_api_timeout }}"
+  block:
+    - name: "Rolling restart | Wait for cluster health '{{ _es_batch_status_before }}' before batch"
+      ansible.builtin.uri:
+        url: "{{ _es_batch_api_url }}/_cluster/health?wait_for_status={{ _es_batch_status_before }}{{ _es_batch_health_params }}&timeout=30s"
+        status_code: [200, 408]
+      register: _es_roll_health_before
+      until:
+        - (_es_roll_health_before.status | default(-1)) == 200
+        - (_es_roll_health_before.json.status | default('red')) in (['green'] if _es_batch_status_before == 'green' else ['yellow', 'green'])
+      retries: "{{ elasticsearch_api_retries }}"
+      delay: "{{ elasticsearch_api_delay }}"
+
+    - name: Rolling restart | Limit shard allocation to primaries
+      ansible.builtin.uri:
+        url: "{{ _es_batch_api_url }}/_cluster/settings"
+        method: PUT
+        body:
+          persistent:
+            cluster.routing.allocation.enable: primaries
+      register: _es_roll_alloc_primaries
+      until: _es_roll_alloc_primaries is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+      changed_when: true
+
+    - name: Rolling restart | Flush indices
+      ansible.builtin.uri:
+        url: "{{ _es_batch_api_url }}/_flush"
+        method: POST
+        status_code: [200, 409]
+      register: _es_roll_flush
+      until: _es_roll_flush is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+      changed_when: false
+
+    - name: Rolling restart | Stop Elasticsearch
+      ansible.builtin.systemd_service:
+        name: elasticsearch
+        state: stopped
+        no_block: true
+      delegate_to: "{{ item }}"
+      loop: "{{ _es_batch }}"
+
+    - name: Rolling restart | Wait for Elasticsearch to stop
+      ansible.builtin.command:
+        cmd: systemctl is-active elasticsearch
+      delegate_to: "{{ item }}"
+      loop: "{{ _es_batch }}"
+      register: _es_roll_stopped
+      until: (_es_roll_stopped.stdout | trim) in ['inactive', 'failed', 'unknown']
+      retries: "{{ elasticsearch_api_retries }}"
+      delay: "{{ elasticsearch_api_delay }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Rolling restart | Upgrade Elasticsearch package
+      ansible.builtin.dnf:
+        name: "elasticsearch-{{ hostvars[item]._es_target_version }}"
+        state: present
+        allow_downgrade: false
+        lock_timeout: "{{ elasticsearch_dnf_lock_timeout }}"
+        enablerepo: "{{ _es_package_repos if _es_package_repos | length > 0 else omit }}"
+      delegate_to: "{{ item }}"
+      loop: "{{ _es_batch_upgrades }}"
+      async: "{{ 0 if ansible_check_mode else elasticsearch_download_async_timeout }}"
+      poll: "{{ elasticsearch_download_async_poll }}"
+      register: _es_roll_upgrade
+      until: _es_roll_upgrade is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+
+    - name: Rolling restart | Reinstall plugins on upgraded nodes
+      ansible.builtin.include_tasks: plugins_sync.yml
+      vars:
+        _es_plugin_host: "{{ _es_upgrade_host }}"
+        _es_plugin_reinstall: true
+      loop: "{{ _es_batch_upgrades }}"
+      loop_control:
+        loop_var: _es_upgrade_host
+
+    # The reinstalled plugins are new files (their names carry the version), so
+    # fapolicyd would refuse to let the node load them on start.
+    - name: Rolling restart | Refresh fapolicyd trust on upgraded nodes
+      ansible.builtin.include_tasks:
+        file: fapolicyd_refresh.yml
+        apply:
+          tags: [elasticsearch, elasticsearch_service]
+      vars:
+        _es_fapolicyd_host: "{{ _es_trust_host }}"
+      loop: >-
+        {{ _es_batch_upgrades | select('in', ansible_play_hosts | map('extract', hostvars)
+             | selectattr('_es_fapolicyd_trust', 'defined') | selectattr('_es_fapolicyd_trust')
+             | map(attribute='inventory_hostname') | list) | list }}
+      loop_control:
+        loop_var: _es_trust_host
+
+    - name: Rolling restart | Start Elasticsearch
+      ansible.builtin.systemd_service:
+        name: elasticsearch
+        state: started
+        daemon_reload: "{{ (_es_batch_upgrades | length) > 0 }}"
+        no_block: true
+      delegate_to: "{{ item }}"
+      loop: "{{ _es_batch }}"
+
+    - name: Rolling restart | Wait for HTTP layer on restarted nodes
+      ansible.builtin.uri:
+        url: "{{ hostvars[item]._es_api_url }}/"
+        status_code: [200, 401]
+        force_basic_auth: false
+      loop: "{{ _es_batch }}"
+      register: _es_roll_http
+      until: (_es_roll_http.status | default(-1)) in [200, 401]
+      retries: "{{ elasticsearch_api_retries }}"
+      delay: "{{ elasticsearch_api_delay }}"
+
+    - name: Rolling restart | Wait for restarted nodes to join the cluster
+      ansible.builtin.uri:
+        url: "{{ _es_batch_api_url }}/_cat/nodes?h=name&format=json"
+      register: _es_roll_nodes
+      until:
+        - (_es_roll_nodes.status | default(-1)) == 200
+        - _es_batch_node_names | difference(_es_roll_nodes.json | default([]) | map(attribute='name') | list) | length == 0
+      retries: "{{ elasticsearch_api_retries }}"
+      delay: "{{ elasticsearch_api_delay }}"
+
+    - name: Rolling restart | Re-enable shard allocation
+      ansible.builtin.uri:
+        url: "{{ _es_batch_api_url }}/_cluster/settings"
+        method: PUT
+        body:
+          persistent:
+            cluster.routing.allocation.enable: null
+      register: _es_roll_alloc_all
+      until: _es_roll_alloc_all is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+      changed_when: true
+
+    - name: "Rolling restart | Wait for cluster health '{{ _es_batch_status_after }}' after batch"
+      ansible.builtin.uri:
+        url: "{{ _es_batch_api_url }}/_cluster/health?wait_for_status={{ _es_batch_status_after }}{{ _es_batch_health_params }}&timeout=30s"
+        status_code: [200, 408]
+      register: _es_roll_health_after
+      until:
+        - (_es_roll_health_after.status | default(-1)) == 200
+        - (_es_roll_health_after.json.status | default('red')) in (['green'] if _es_batch_status_after == 'green' else ['yellow', 'green'])
+      retries: "{{ elasticsearch_api_retries }}"
+      delay: "{{ elasticsearch_api_delay }}"
+
+  rescue:
+    - name: Rolling restart | Stop after failed batch
+      ansible.builtin.fail:
+        msg: >-
+          Rolling restart failed for batch [{{ _es_batch | join(', ') }}] at task
+          '{{ ansible_failed_task.name | default('unknown') }}'. No further nodes were restarted.
+          Shard allocation may still be limited to primaries; once the nodes are back, run:
+          PUT _cluster/settings {"persistent": {"cluster.routing.allocation.enable": null}}

@@ -1,0 +1,9 @@
+# {{ ansible_managed }}
+[Service]
+{% if elasticsearch_memory_lock | bool %}
+LimitMEMLOCK=infinity
+{% endif %}
+TimeoutStartSec={{ elasticsearch_systemd_timeout_start_sec }}
+{% for name, value in elasticsearch_systemd_environment | dictsort %}
+Environment="{{ name }}={{ value }}"
+{% endfor %}

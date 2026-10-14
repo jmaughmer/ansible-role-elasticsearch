@@ -1,0 +1,33 @@
+---
+- name: Configure | Decide whether to render cluster.initial_master_nodes
+  ansible.builtin.set_fact:
+    _es_render_initial_master_nodes: "{{ (_es_cluster_bootstrap | bool) and _es_discovery_type == 'multi-node' }}"
+
+- name: Configure | Render elasticsearch.yml
+  ansible.builtin.template:
+    src: elasticsearch.yml.j2
+    dest: "{{ elasticsearch_conf_dir }}/elasticsearch.yml"
+    owner: root
+    group: elasticsearch
+    mode: "0660"
+  register: _es_config_file
+
+- name: Configure | Render JVM options
+  ansible.builtin.template:
+    src: jvm.options.j2
+    dest: "{{ elasticsearch_conf_dir }}/jvm.options.d/ansible.options"
+    owner: root
+    group: elasticsearch
+    mode: "0660"
+  register: _es_jvm_file
+
+- name: Configure | Remove RPM security auto-configuration certificates
+  ansible.builtin.file:
+    path: "{{ elasticsearch_conf_dir }}/certs"
+    state: absent
+  when: elasticsearch_remove_autoconfig_certs | bool
+
+- name: Configure | Flag restart for configuration changes
+  ansible.builtin.set_fact:
+    _es_restart_required: true
+  when: _es_config_file is changed or _es_jvm_file is changed
