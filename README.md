@@ -608,8 +608,8 @@ The three nodes use a 512 MB heap each, and each downloads the Elasticsearch pac
 than the defaults allow.
 
 Lint with `yamllint .` and `ansible-lint` (configured by [`.yamllint`](.yamllint) and
-[`.ansible-lint`](.ansible-lint)). [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs both,
-then every Podman scenario on both distros.
+[`.ansible-lint`](.ansible-lint)). There is no GitHub Actions workflow; run the lint and Molecule
+scenarios locally.
 
 Not covered by containers: `vm.max_map_count` (`elasticsearch_manage_sysctl`), memory locking,
 firewalld, SELinux file contexts, fapolicyd trust entries, Satellite repositories, Active Directory,
