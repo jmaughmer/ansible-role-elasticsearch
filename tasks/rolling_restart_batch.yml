@@ -31,7 +31,6 @@
       force_basic_auth: true
       ca_path: "{{ _es_api_ca_path }}"
       validate_certs: "{{ elasticsearch_api_validate_certs | bool }}"
-      body_format: json
       timeout: "{{ elasticsearch_api_timeout }}"
   block:
     - name: "Rolling restart | Wait for cluster health '{{ _es_batch_status_before }}' before batch"
@@ -49,6 +48,7 @@
       ansible.builtin.uri:
         url: "{{ _es_batch_api_url }}/_cluster/settings"
         method: PUT
+        body_format: json
         body:
           persistent:
             cluster.routing.allocation.enable: primaries
@@ -164,6 +164,7 @@
       ansible.builtin.uri:
         url: "{{ _es_batch_api_url }}/_cluster/settings"
         method: PUT
+        body_format: json
         body:
           persistent:
             cluster.routing.allocation.enable: null

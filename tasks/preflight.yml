@@ -185,7 +185,7 @@
     that:
       - item.name is defined
       - (item.state | default('present')) in ['present', 'absent']
-      - (item.state | default('present')) == 'absent' or item.definition is mapping
+      - (item.state | default('present')) == 'absent' or (item.definition is defined and item.definition is mapping)
     fail_msg: "Each role / role mapping needs a name, a state of present/absent and a definition dict."
     quiet: true
   loop: "{{ elasticsearch_security_roles + elasticsearch_security_role_mappings }}"
@@ -247,7 +247,7 @@
       - item.name is defined
       - item.name is not match('.*[*,/ ].*')
       - (item.state | default('present')) in ['present', 'absent']
-      - (item.state | default('present')) == 'absent' or item.definition is mapping
+      - (item.state | default('present')) == 'absent' or (item.definition is defined and item.definition is mapping)
     fail_msg: >-
       Each ingest pipeline needs a name (without *, commas, slashes or spaces), a state of
       present/absent and a definition dict.

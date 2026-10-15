@@ -13,7 +13,6 @@
       force_basic_auth: true
       ca_path: "{{ _es_api_ca_path }}"
       validate_certs: "{{ elasticsearch_api_validate_certs | bool }}"
-      body_format: json
       timeout: "{{ elasticsearch_api_timeout }}"
   block:
     # ---------------------------------------------------- downloader settings
@@ -55,6 +54,7 @@
       ansible.builtin.uri:
         url: "{{ _es_api_url }}/_cluster/settings"
         method: PUT
+        body_format: json
         body: "{{ {'persistent': {item.key: item.value}} }}"
       loop: "{{ _es_geoip_cluster_settings | dict2items }}"
       loop_control:
@@ -85,6 +85,7 @@
       ansible.builtin.uri:
         url: "{{ _es_api_url }}/_ingest/pipeline/{{ item.item.name | urlencode }}"
         method: PUT
+        body_format: json
         body: >-
           {{ item.item.definition | combine({'_meta': (item.item.definition._meta | default({}))
                                               | combine({'ansible_managed_hash': _es_hash})}) }}

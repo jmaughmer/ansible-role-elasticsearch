@@ -16,7 +16,6 @@
       force_basic_auth: true
       ca_path: "{{ _es_api_ca_path }}"
       validate_certs: "{{ elasticsearch_api_validate_certs | bool }}"
-      body_format: json
       timeout: "{{ elasticsearch_api_timeout }}"
   block:
     - name: License | Validate license document
@@ -39,6 +38,7 @@
       ansible.builtin.uri:
         url: "{{ _es_api_url }}/_license?acknowledge=true"
         method: PUT
+        body_format: json
         body: "{{ _es_license_body }}"
       register: _es_license_update
       until: _es_license_update is not failed

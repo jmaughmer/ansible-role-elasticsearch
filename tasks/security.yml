@@ -15,7 +15,6 @@
       force_basic_auth: true
       ca_path: "{{ _es_api_ca_path }}"
       validate_certs: "{{ elasticsearch_api_validate_certs | bool }}"
-      body_format: json
       timeout: "{{ elasticsearch_api_timeout }}"
   block:
     # ------------------------------------------------------------------ roles
@@ -35,6 +34,7 @@
       ansible.builtin.uri:
         url: "{{ _es_api_url }}/_security/role/{{ item.item.name | urlencode }}"
         method: PUT
+        body_format: json
         body: >-
           {{ item.item.definition | combine({'metadata': (item.item.definition.metadata | default({}))
                                               | combine({'ansible_managed_hash': _es_hash})}) }}
@@ -86,6 +86,7 @@
       ansible.builtin.uri:
         url: "{{ _es_api_url }}/_security/role_mapping/{{ item.item.name | urlencode }}"
         method: PUT
+        body_format: json
         body: >-
           {{ item.item.definition | combine({'metadata': (item.item.definition.metadata | default({}))
                                               | combine({'ansible_managed_hash': _es_hash})}) }}

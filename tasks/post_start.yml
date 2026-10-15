@@ -36,6 +36,45 @@
   delay: "{{ elasticsearch_api_delay }}"
   run_once: true
 
+# Until the elastic user has a password in the security index, each node checks
+# it against bootstrap.password in its own keystore, and keystore.yml removes
+# that entry once the node has data: a node restarted after that would refuse
+# elastic. Storing the password makes the keystore entry unnecessary. Needed
+# whenever a node started without data; setting the same password again on a
+# cluster that already stores it changes nothing.
+- name: Cluster | Store the elastic password in the security index
+  ansible.builtin.uri:
+    url: "{{ _es_api_url }}/_security/user/elastic/_password"
+    method: POST
+    body_format: json
+    body:
+      password: "{{ elasticsearch_elastic_password }}"
+    url_username: elastic
+    url_password: "{{ elasticsearch_elastic_password }}"
+    force_basic_auth: true
+    ca_path: "{{ _es_api_ca_path }}"
+    validate_certs: "{{ elasticsearch_api_validate_certs | bool }}"
+    timeout: "{{ elasticsearch_api_timeout }}"
+  register: _es_elastic_password_stored
+  until: _es_elastic_password_stored is not failed
+  retries: "{{ elasticsearch_task_retries }}"
+  delay: "{{ elasticsearch_task_delay }}"
+  changed_when: true
+  run_once: true
+  no_log: "{{ elasticsearch_no_log }}"
+  when: ansible_play_hosts | map('extract', hostvars, '_es_has_data') | map('bool') | reject | list | length > 0
+
+# Nodes read the keystore when they start, so this changes nothing on a
+# running node and needs no restart.
+- name: Cluster | Remove bootstrap.password from the keystore of new nodes
+  ansible.builtin.command:
+    argv:
+      - "{{ elasticsearch_home }}/bin/elasticsearch-keystore"
+      - remove
+      - bootstrap.password
+  changed_when: true
+  when: not (_es_has_data | bool)
+
 # cluster.initial_master_nodes must not stay in the configuration once the
 # cluster has formed. It is ignored after bootstrap, so no restart is needed.
 - name: Cluster | Stop rendering cluster.initial_master_nodes
