@@ -1,0 +1,78 @@
+---
+# Three systemd containers (rootless Podman is fine) on one network, forming a
+# three-node cluster in the inventory group "elasticsearch". Each node gets its
+# certificate a different way (see inventory/):
+#   es-1  default roles; certificate and key as content
+#   es-2  default roles; certificate, key and CA as paths of files on the host
+#   es-3  master and data only (no ingest), node.name es-node-3; its key is
+#         encrypted, so the passphrase goes into the keystore
+# prepare.yml creates the test CA and the node certificates.
+# MOLECULE_DISTRO picks the EL release (default rockylinux9; also
+# rockylinux10) — see the README's "Testing" section. The playbooks and
+# inventory here are shared with the other scenarios.
+#
+# The host running the containers needs vm.max_map_count >= 262144: the
+# setting is not namespaced, so the role cannot set it from inside a container
+# (elasticsearch_manage_sysctl is off) and prepare.yml stops early without it.
+#
+# Inside containers SELinux is off, and firewalld and fapolicyd aren't
+# installed, so this exercises the role's skip paths for all three.
+#
+# side_effect.yml (configuration changes, rolling restarts, API changes) runs
+# after the idempotence check. There is no `check` step: on fresh hosts the
+# keystore tasks need the package installed.
+role_name_check: 1
+
+dependency:
+  name: galaxy   # installs requirements.yml next to this file
+
+driver:
+  name: podman
+
+platforms:
+  - name: es-1
+    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    pre_build_image: true
+    override_command: false   # keep the image's own CMD: systemd as PID 1
+    systemd: always
+    network: elasticsearch_molecule   # created by the driver from the first platform
+    groups: [elasticsearch]
+
+  - name: es-2
+    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    pre_build_image: true
+    override_command: false
+    systemd: always
+    network: elasticsearch_molecule
+    groups: [elasticsearch]
+
+  - name: es-3
+    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    pre_build_image: true
+    override_command: false
+    systemd: always
+    network: elasticsearch_molecule
+    groups: [elasticsearch]
+
+provisioner:
+  name: ansible
+  inventory:
+    links:
+      group_vars: inventory/group_vars/
+      host_vars: inventory/host_vars/
+
+verifier:
+  name: ansible
+
+scenario:
+  test_sequence:
+    - dependency
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - side_effect
+    - verify
+    - destroy

@@ -1,0 +1,58 @@
+---
+# One case from converge.yml: test_case and the settings under test come from
+# its import as play variables. Runs the role's facts and preflight tasks, then
+# checks the outcome.
+- name: Preflight case | {{ test_case.name | default('') }}
+  hosts: elasticsearch
+  become: true
+  gather_facts: true
+  vars:
+    test_role: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+  tasks:
+    - name: Reset the outcome | {{ test_case.name }}
+      ansible.builtin.set_fact:
+        test_failed: false
+        test_failed_task: ""
+        test_failure: ""
+        test_failure_raw: ""
+
+    - name: Run the role's preflight | {{ test_case.name }}
+      block:
+        - name: Gather the role's facts | {{ test_case.name }}
+          ansible.builtin.include_role:
+            name: "{{ test_role }}"
+            tasks_from: facts
+
+        - name: Run the preflight checks | {{ test_case.name }}
+          ansible.builtin.include_role:
+            name: "{{ test_role }}"
+            tasks_from: preflight
+
+      # Several checks fail with the same message, so the failed task's name
+      # is recorded too.
+      rescue:
+        - name: Record the failure | {{ test_case.name }}
+          vars:
+            test_results: "{{ [ansible_failed_result] + (ansible_failed_result.results | default([])) }}"
+          ansible.builtin.set_fact:
+            test_failed: true
+            test_failed_task: "{{ ansible_failed_task.name | default('') }}"
+            test_failure: "{{ test_results | selectattr('msg', 'defined') | map(attribute='msg') | join(' ') }}"
+            test_failure_raw: "{{ ansible_failed_result | to_json }}"
+
+    - name: Check the outcome | {{ test_case.name }}
+      vars:
+        test_should_fail: "{{ test_case.task | default('') | length > 0 }}"
+        test_leaked: "{{ test_secrets | select('in', test_failure_raw) | list }}"
+      ansible.builtin.assert:
+        that:
+          - test_failed == test_should_fail
+          - not test_failed or test_failed_task is search(test_case.task)
+          - not test_failed or test_failure is search(test_case.expect)
+          - test_leaked | length == 0
+        fail_msg: >-
+          Case '{{ test_case.name }}': expected
+          {{ ('a failure in "' ~ test_case.task ~ '" matching "' ~ test_case.expect ~ '"') if test_should_fail else 'no failure' }},
+          got {{ ('a failure in "' ~ test_failed_task ~ '": ' ~ test_failure) if test_failed else 'none' }}.
+          {{ ('The failure printed ' ~ (test_leaked | length) ~ ' secret(s).') if test_leaked | length > 0 else '' }}
+        quiet: true

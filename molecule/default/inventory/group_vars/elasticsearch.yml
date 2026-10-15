@@ -1,0 +1,87 @@
+---
+# Shared by every scenario that converges the cluster (inventory links in each
+# molecule.yml). side_effect.yml and verify.yml check against these values.
+
+# Written by prepare.yml for the containers' names and addresses
+test_tls_dir: "{{ lookup('env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/tls"
+# Where prepare.yml puts them on hosts with test_tls_on_host
+test_tls_host_dir: /etc/pki/molecule
+# Encrypts the keys prepare.yml writes as <host>.encrypted.key
+test_key_passphrase: molecule-key-passphrase
+
+# The role's default elasticsearch_version, which verify.yml expects. Read
+# from the file because playbooks outside the role don't see its defaults.
+test_version: >-
+  {{ (lookup('ansible.builtin.file', lookup('env', 'MOLECULE_PROJECT_DIRECTORY') ~ '/defaults/main.yml')
+      | from_yaml).elasticsearch_version }}
+
+elasticsearch_cluster_name: molecule
+elasticsearch_elastic_password: molecule-elastic-password
+
+# Each node's entry gives certificate and key as content; host_vars change that
+# for es-2 and es-3.
+ssl_certificates:
+  - name: "{{ inventory_hostname }}"
+    certificate:
+      content: "{{ lookup('ansible.builtin.file', test_tls_dir ~ '/' ~ inventory_hostname ~ '.crt') }}"
+    key:
+      content: "{{ lookup('ansible.builtin.file', test_tls_dir ~ '/' ~ inventory_hostname ~ '.key') }}"
+elasticsearch_ssl_ca_certificate: "{{ lookup('ansible.builtin.file', test_tls_dir ~ '/ca.crt') }}"
+
+# ---------------------------------------------------------------- containers
+# Small heap: three nodes share one machine
+elasticsearch_heap_size: 512m
+# Rootless containers cannot raise the locked-memory limit
+elasticsearch_memory_lock: false
+# The host's setting, checked by prepare.yml
+elasticsearch_manage_sysctl: false
+# CI runners' disks are often past the default watermarks, which would keep
+# replicas unassigned and the cluster yellow.
+elasticsearch_config_extra:
+  cluster.routing.allocation.disk.threshold_enabled: false
+
+# Wait less and retry less: a failure in a container is not a slow link
+elasticsearch_api_retries: 36
+elasticsearch_api_delay: 5
+elasticsearch_task_retries: 1
+elasticsearch_task_delay: 5
+elasticsearch_download_async_poll: 5
+# Show what was sent if a run fails (the preflight scenario covers no_log)
+elasticsearch_no_log: false
+
+# ---------------------------------------------------------------- features
+# Downloaded from Elastic, and reinstalled by the upgrade scenario
+elasticsearch_plugins:
+  - mapper-size
+
+# No downloads from geoip.elastic.co during tests; turning the downloader off
+# also exercises the cluster settings the role manages.
+elasticsearch_geoip_downloader_enabled: false
+
+elasticsearch_security_roles:
+  - name: molecule_reader
+    definition:
+      cluster: [monitor]
+      indices:
+        - names: ["molecule-*"]
+          privileges: [read, view_index_metadata]
+  # Never created: removing a role that is not there is not an error
+  - name: molecule_never
+    state: absent
+
+elasticsearch_security_role_mappings:
+  - name: molecule_readers
+    definition:
+      enabled: true
+      roles: [molecule_reader]
+      rules:
+        field: { username: molecule }
+
+elasticsearch_ingest_pipelines:
+  - name: molecule-tag
+    definition:
+      description: Tag documents indexed by the Molecule tests
+      processors:
+        - set:
+            field: tags
+            value: [molecule]

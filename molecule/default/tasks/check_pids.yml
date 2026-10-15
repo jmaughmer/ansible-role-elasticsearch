@@ -1,0 +1,18 @@
+---
+# Included by side_effect.yml after a change: Elasticsearch runs, and was
+# restarted (a new main PID) exactly when test_expect_restart says so.
+- name: Read Elasticsearch's main PID
+  ansible.builtin.systemd_service:
+    name: elasticsearch
+  register: test_unit
+
+- name: Check whether the node was restarted
+  ansible.builtin.assert:
+    that:
+      - test_unit.status.ActiveState == 'active'
+      - test_unit.status.MainPID | int > 0
+      - (test_unit.status.MainPID | int != test_pid_before | int) == (test_expect_restart | bool)
+    fail_msg: >-
+      On {{ inventory_hostname }} Elasticsearch's PID went from {{ test_pid_before }} to
+      {{ test_unit.status.MainPID }} ({{ test_unit.status.ActiveState }}); a restart was
+      {{ '' if test_expect_restart | bool else 'not ' }}expected.

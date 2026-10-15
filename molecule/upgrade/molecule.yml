@@ -1,0 +1,66 @@
+---
+# A rolling upgrade: converge.yml installs the cluster on an older 9.x release,
+# side_effect.yml applies the role with the default elasticsearch_version,
+# and the default verification then checks the upgraded cluster.
+#   molecule test -s upgrade
+# Same nodes, prepare and inventory as the default scenario, so the two cannot
+# run on one machine at the same time.
+role_name_check: 1
+
+dependency:
+  name: galaxy
+  options:
+    requirements-file: ${MOLECULE_SCENARIO_DIRECTORY}/../default/requirements.yml
+
+driver:
+  name: podman
+
+platforms:
+  - name: es-1
+    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    pre_build_image: true
+    override_command: false
+    systemd: always
+    network: elasticsearch_upgrade
+    groups: [elasticsearch]
+
+  - name: es-2
+    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    pre_build_image: true
+    override_command: false
+    systemd: always
+    network: elasticsearch_upgrade
+    groups: [elasticsearch]
+
+  - name: es-3
+    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    pre_build_image: true
+    override_command: false
+    systemd: always
+    network: elasticsearch_upgrade
+    groups: [elasticsearch]
+
+provisioner:
+  name: ansible
+  playbooks:
+    prepare: ../default/prepare.yml
+    verify: ../default/verify.yml
+  inventory:
+    links:
+      group_vars: ../default/inventory/group_vars/
+      host_vars: ../default/inventory/host_vars/
+
+verifier:
+  name: ansible
+
+scenario:
+  test_sequence:
+    - dependency
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - side_effect
+    - verify
+    - destroy

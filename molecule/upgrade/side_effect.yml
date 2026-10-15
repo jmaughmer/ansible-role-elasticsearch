@@ -1,0 +1,94 @@
+---
+# Applies the role with the default elasticsearch_version to the cluster
+# converge.yml installed on the older release: every running node is upgraded
+# in a rolling restart, its plugins reinstalled for the new version, and the
+# data kept.
+- name: Index a document on the older release
+  hosts: elasticsearch
+  become: true
+  gather_facts: false
+  module_defaults: &api
+    ansible.builtin.uri:
+      url_username: elastic
+      url_password: "{{ elasticsearch_elastic_password }}"
+      force_basic_auth: true
+      ca_path: /etc/elasticsearch/tls/ca.crt
+      timeout: 30
+  vars:
+    test_api: "https://{{ inventory_hostname }}:9200"
+  tasks:
+    - name: Create an index with a copy on every node
+      ansible.builtin.uri:
+        url: "{{ test_api }}/molecule-data"
+        method: PUT
+        body_format: json
+        body:
+          settings:
+            number_of_shards: 1
+            number_of_replicas: 2
+      run_once: true
+
+    - name: Index a document
+      ansible.builtin.uri:
+        url: "{{ test_api }}/molecule-data/_doc/1?refresh=true"
+        method: PUT
+        body_format: json
+        body:
+          message: hello
+        status_code: 201
+      run_once: true
+
+    - name: Wait for every copy to be assigned
+      ansible.builtin.uri:
+        url: "{{ test_api }}/_cluster/health/molecule-data?wait_for_status=green&timeout=60s"
+      register: test_health
+      failed_when: test_health.json.status != 'green'
+      run_once: true
+
+- name: Upgrade the cluster
+  hosts: elasticsearch
+  become: true
+  gather_facts: false
+  module_defaults: *api
+  vars:
+    test_api: "https://{{ inventory_hostname }}:9200"
+  tasks:
+    - name: Remember each node's process
+      ansible.builtin.include_tasks: ../default/tasks/record_pids.yml
+
+    - name: Apply the role
+      ansible.builtin.include_role:
+        name: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+
+    - name: Check the upgrade was left to the rolling restart, one node at a time
+      ansible.builtin.assert:
+        that:
+          - _es_upgrade_pending | bool
+          - not (_es_upgraded_offline | bool)
+          - hostvars[ansible_play_hosts_all[0]]._es_roll_batches == ansible_play_hosts_all | map('split') | list
+        fail_msg: "Restart batches: {{ hostvars[ansible_play_hosts_all[0]]._es_roll_batches }}"
+
+    - name: Check every node was restarted
+      ansible.builtin.include_tasks: ../default/tasks/check_pids.yml
+      vars:
+        test_expect_restart: true
+
+    - name: Read each node's version
+      ansible.builtin.uri:
+        url: "{{ test_api }}/_nodes?filter_path=nodes.*.version"
+      register: test_nodes
+      run_once: true
+
+    - name: Check every node runs the new version
+      ansible.builtin.assert:
+        that:
+          - test_nodes.json.nodes.values() | map(attribute='version') | list == [test_version] * 3
+        fail_msg: "{{ test_nodes.json | to_json }}"
+      run_once: true
+
+    - name: Check the document survived
+      ansible.builtin.uri:
+        url: "{{ test_api }}/molecule-data/_count"
+      register: test_count
+      failed_when: test_count.json.count != 1
+      run_once: true

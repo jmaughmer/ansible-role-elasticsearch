@@ -363,7 +363,7 @@ curl -s -u elastic --cacert ca.crt "https://es-data-1.example.com:9200/_ingest/g
 2. **New and stopped nodes** are started in parallel.
    - For a brand-new cluster (no node has data or is running), `cluster.initial_master_nodes` is rendered from the master-eligible hosts in the cluster group.
    - Once the cluster forms, the setting is removed again without a restart.
-   - The `elastic` password is seeded from `bootstrap.password`.
+   - The `elastic` password is seeded from `bootstrap.password`. Once the cluster has formed, the role stores it in the security index and removes `bootstrap.password` from the new nodes' keystores.
 3. **Rolling restart of running nodes that need it.** This is driven from the first host in the play:
    - Batches are built with non-master nodes first, then master-eligible nodes, each group with its own size limit.
    - For each batch:
@@ -535,6 +535,86 @@ under a targeted policy in enforcing mode. Two things still matter:
 - **Containers.** `vm.max_map_count` can't be set from inside a container. Set `elasticsearch_manage_sysctl: false` and configure it on the container host instead.
 - **Logstash user.** The example `group_vars` create a `logstash_writer` security role for Logstash's Elasticsearch output. The role doesn't create native users; create `logstash_internal` yourself.
 
+## Testing
+
+[`molecule/default/`](molecule/default/) builds a three-node cluster in systemd containers on one
+container network. Every node is master-eligible, and each gets its certificate a different way:
+
+| Node | Roles | Certificate |
+|---|---|---|
+| `es-1` | default | certificate and key as content |
+| `es-2` | default | certificate, key and CA as paths of files already on the host |
+| `es-3` | `master`, `data` (no ingest), `node.name: es-node-3` | key encrypted with a passphrase, which goes into the keystore |
+
+[`prepare.yml`](molecule/default/prepare.yml) creates a test CA and a certificate per node for the
+name and address each container got. openssl runs in the first container, so the machine running
+Molecule doesn't need it. The inventory adds the `mapper-size` plugin, a security role, a role mapping
+and an ingest pipeline, and turns the GeoIP downloader off. The sequence is:
+
+1. **converge**, then **idempotence:** a second converge must change nothing.
+2. **side effect** ([`side_effect.yml`](molecule/default/side_effect.yml)):
+   - It indexes a document through the managed pipeline into an index with a copy on every node.
+   - It changes the JVM options with `elasticsearch_restart_on_change: false`. A restart is flagged
+     and no node restarts.
+   - It changes a node attribute. That triggers a rolling restart, one node at a time in inventory
+     order, after which every node runs the new attribute and the JVM option held back before. A
+     changed role definition and a pipeline set to `absent` are applied in the same run.
+   - It goes back to the converge settings, which triggers another rolling restart.
+3. **verify** ([`verify.yml`](molecule/default/verify.yml)):
+   - Every node runs the pinned version, and the Elastic repository is defined but disabled.
+   - File modes and owners are correct, the RPM's `certs/` directory is gone, and
+     `cluster.initial_master_nodes` was removed.
+   - The keystore no longer has `bootstrap.password` or the RPM's auto-configuration entries, and
+     holds the key passphrase only on `es-3`.
+   - The cluster is green with three nodes, and node names, roles, version and plugins are as
+     configured.
+   - Anonymous requests are refused.
+   - The role, role mapping, pipeline and GeoIP setting exist through the API, a role set to
+     `absent` doesn't, and shard allocation is no longer limited to primaries.
+
+Other scenarios:
+
+| Scenario | What it covers |
+|---|---|
+| `preflight` | Settings preflight must refuse, each in its own task with its own message: an unsupported distribution, a host outside its cluster group, inexact or 8.x versions, bad package source settings, a short `elastic` password, unknown node roles, a bad heap size, missing TLS material, bad firewall, SELinux, FIPS, Active Directory, plugin, role, pipeline and GeoIP settings, no master-eligible node, and restart batches that would lose quorum. Failures under `no_log` must not print the password, key or bind password. Nothing is installed. |
+| `upgrade` | A cluster installed on 9.4.8 is upgraded to `elasticsearch_version` in a rolling restart. Plugins are reinstalled, the data is kept, and the default verification then passes. |
+| `docker` | The default scenario on Docker instead of Podman. |
+
+```bash
+pip install -r molecule/requirements.txt
+```
+
+The machine running the containers needs `vm.max_map_count` of at least 262144. The setting isn't
+namespaced, so the role can't set it from inside a container:
+
+```bash
+sudo sysctl -w vm.max_map_count=262144
+```
+
+```bash
+for s in default preflight upgrade; do molecule test -s "$s" || break; done
+```
+
+The scenarios use Podman (rootless works), except `docker`, which needs Docker. `default`, `upgrade`
+and `docker` use the same container names, so run them one at a time. `MOLECULE_DISTRO` picks the
+image (default `rockylinux9`; also `rockylinux10`):
+
+```bash
+MOLECULE_DISTRO=rockylinux10 molecule test -s preflight
+```
+
+The three nodes use a 512 MB heap each, and each downloads the Elasticsearch package from Elastic.
+`elasticsearch.yml` in the tests turns off disk watermarks, because CI runners' disks are often fuller
+than the defaults allow.
+
+Lint with `yamllint .` and `ansible-lint` (configured by [`.yamllint`](.yamllint) and
+[`.ansible-lint`](.ansible-lint)). [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs both,
+then every Podman scenario on both distros.
+
+Not covered by containers: `vm.max_map_count` (`elasticsearch_manage_sysctl`), memory locking,
+firewalld, SELinux file contexts, fapolicyd trust entries, Satellite repositories, Active Directory,
+and licenses. Those need virtual machines or the services themselves.
+
 ## Role layout
 
 ```
@@ -562,7 +642,8 @@ under a targeted policy in enforcing mode. Two things still matter:
 │   ├── security.yml           # roles + role mappings
 │   └── ingest.yml             # GeoIP downloader settings + ingest pipelines
 ├── templates/
-└── examples/
+├── examples/
+└── molecule/                  # tests, see Testing
 ```
 
 ## Related roles

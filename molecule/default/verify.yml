@@ -1,0 +1,257 @@
+---
+# Checks each node's files and service, then the cluster through the REST API.
+# Every API call authenticates as elastic and validates the node certificate
+# against the test CA.
+- name: Verify each node
+  hosts: elasticsearch
+  become: true
+  gather_facts: false
+  vars:
+    test_conf_dir: /etc/elasticsearch
+    test_node_name: "{{ elasticsearch_node_name | default(inventory_hostname) }}"
+    test_node_roles: "{{ elasticsearch_node_roles | default(['master', 'data', 'ingest', 'remote_cluster_client']) }}"
+  tasks:
+    - name: Read the service state
+      ansible.builtin.service_facts:
+
+    - name: Check Elasticsearch is running and enabled
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services['elasticsearch.service'].state == 'running'
+          - ansible_facts.services['elasticsearch.service'].status == 'enabled'
+
+    - name: Read the installed packages
+      ansible.builtin.package_facts:
+
+    - name: Check the requested version is installed
+      vars:
+        test_installed: "{{ ansible_facts.packages.elasticsearch | map(attribute='version') | list }}"
+      ansible.builtin.assert:
+        that:
+          - test_installed == [test_version]
+        fail_msg: "{{ inventory_hostname }} has {{ test_installed }}, expected {{ test_version }}"
+
+    # Left disabled so a routine `dnf update` cannot upgrade Elasticsearch
+    - name: Check the Elastic repository is defined but disabled
+      ansible.builtin.command: dnf -q repolist --disabled elasticsearch-9.x
+      register: test_repo
+      changed_when: false
+      failed_when: test_repo.stdout is not search('elasticsearch-9.x')
+
+    - name: Check file ownership and modes
+      ansible.builtin.stat:
+        path: "{{ item.path }}"
+      register: test_stat
+      failed_when: >-
+        not test_stat.stat.exists
+        or test_stat.stat.mode != item.mode
+        or test_stat.stat.pw_name != 'root'
+        or test_stat.stat.gr_name != 'elasticsearch'
+      loop:
+        - { path: "{{ test_conf_dir }}/elasticsearch.yml", mode: "0660" }
+        - { path: "{{ test_conf_dir }}/jvm.options.d/ansible.options", mode: "0660" }
+        - { path: "{{ test_conf_dir }}/elasticsearch.keystore", mode: "0660" }
+        - { path: "{{ test_conf_dir }}/tls", mode: "0750" }
+        - { path: "{{ test_conf_dir }}/tls/node.crt", mode: "0640" }
+        - { path: "{{ test_conf_dir }}/tls/node.key", mode: "0640" }
+        - { path: "{{ test_conf_dir }}/tls/ca.crt", mode: "0644" }
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: Check the RPM's auto-configured certificates were removed
+      ansible.builtin.stat:
+        path: "{{ test_conf_dir }}/certs"
+      register: test_autoconfig
+      failed_when: test_autoconfig.stat.exists
+
+    - name: Read elasticsearch.yml
+      ansible.builtin.slurp:
+        src: "{{ test_conf_dir }}/elasticsearch.yml"
+      register: test_conf
+
+    - name: Check the node settings and that bootstrapping is over
+      vars:
+        conf: "{{ test_conf.content | b64decode | from_yaml }}"
+      ansible.builtin.assert:
+        that:
+          - conf['cluster.name'] == 'molecule'
+          - conf['node.name'] == test_node_name
+          - conf['node.roles'] == test_node_roles
+          - conf['discovery.seed_hosts'] | sort == ['es-1:9300', 'es-2:9300', 'es-3:9300']
+          - "'cluster.initial_master_nodes' not in conf"
+          - "'discovery.type' not in conf"
+          - conf['bootstrap.memory_lock'] == false
+          - conf['xpack.security.transport.ssl.verification_mode'] == 'full'
+          - conf['cluster.routing.allocation.disk.threshold_enabled'] == false
+        fail_msg: "Unexpected elasticsearch.yml on {{ inventory_hostname }}:\n{{ conf | to_nice_yaml }}"
+
+    - name: Read the JVM options
+      ansible.builtin.slurp:
+        src: "{{ test_conf_dir }}/jvm.options.d/ansible.options"
+      register: test_jvm
+
+    - name: Check the heap size
+      ansible.builtin.assert:
+        that:
+          - test_jvm.content | b64decode is search('^-Xms512m$', multiline=True)
+          - test_jvm.content | b64decode is search('^-Xmx512m$', multiline=True)
+
+    - name: List the keystore
+      ansible.builtin.command: /usr/share/elasticsearch/bin/elasticsearch-keystore list
+      register: test_keystore
+      changed_when: false
+
+    # bootstrap.password only seeds the elastic user on a node without data;
+    # the RPM's auto-configuration entries conflict with the role's PEM setup.
+    # Elasticsearch adds entries of its own (keystore.seed, cluster.state.*).
+    - name: Check the keystore entries the role manages
+      vars:
+        test_entries: "{{ test_keystore.stdout_lines | map('trim') | list }}"
+        test_removed:
+          - bootstrap.password
+          - autoconfiguration.password_hash
+          - xpack.security.http.ssl.keystore.secure_password
+          - xpack.security.transport.ssl.keystore.secure_password
+          - xpack.security.transport.ssl.truststore.secure_password
+        test_passphrase_entries:
+          - xpack.security.http.ssl.secure_key_passphrase
+          - xpack.security.transport.ssl.secure_key_passphrase
+        test_has_passphrase: "{{ ssl_certificates[0].key.passphrase is defined }}"
+      ansible.builtin.assert:
+        that:
+          - test_entries | intersect(test_removed) | length == 0
+          - (test_entries | intersect(test_passphrase_entries) | sort) == (test_passphrase_entries if test_has_passphrase else [])
+        fail_msg: "Keystore on {{ inventory_hostname }}: {{ test_entries }}"
+
+    - name: Check the plugin is installed
+      ansible.builtin.command: /usr/share/elasticsearch/bin/elasticsearch-plugin list
+      register: test_plugins
+      changed_when: false
+      failed_when: test_plugins.stdout_lines != ['mapper-size']
+
+    - name: Read the systemd drop-in
+      ansible.builtin.slurp:
+        src: /etc/systemd/system/elasticsearch.service.d/override.conf
+      register: test_override
+
+    - name: Check the drop-in has the start timeout and no memlock limit
+      ansible.builtin.assert:
+        that:
+          - test_override.content | b64decode is search('^TimeoutStartSec=900$', multiline=True)
+          - test_override.content | b64decode is not search('LimitMEMLOCK')
+
+- name: Verify the cluster
+  hosts: elasticsearch
+  become: true
+  gather_facts: false
+  module_defaults:
+    ansible.builtin.uri:
+      url_username: elastic
+      url_password: "{{ elasticsearch_elastic_password }}"
+      force_basic_auth: true
+      ca_path: /etc/elasticsearch/tls/ca.crt
+      timeout: 30
+  vars:
+    test_api: "https://{{ inventory_hostname }}:9200"
+  tasks:
+    # Every node answers over HTTPS with a certificate the CA vouches for
+    - name: Check each node answers for the cluster
+      ansible.builtin.uri:
+        url: "{{ test_api }}/"
+      register: test_root
+      failed_when: test_root.json.cluster_name != 'molecule'
+
+    - name: Check anonymous requests are refused
+      ansible.builtin.uri:
+        url: "{{ test_api }}/"
+        force_basic_auth: false
+        url_username: ""
+        url_password: ""
+        status_code: 401
+
+    - name: Check the cluster is green with three nodes
+      ansible.builtin.uri:
+        url: "{{ test_api }}/_cluster/health?wait_for_status=green&timeout=60s"
+      register: test_health
+      failed_when: >-
+        test_health.json.status != 'green'
+        or test_health.json.number_of_nodes != 3
+      run_once: true
+
+    - name: Read the nodes
+      ansible.builtin.uri:
+        url: "{{ test_api }}/_nodes?filter_path=nodes.*.name,nodes.*.roles,nodes.*.version,nodes.*.plugins.name"
+      register: test_nodes
+      run_once: true
+
+    - name: Check node names, roles, versions and plugins
+      vars:
+        nodes: "{{ test_nodes.json.nodes.values() | list }}"
+        node_3: "{{ nodes | selectattr('name', 'equalto', 'es-node-3') | first }}"
+      ansible.builtin.assert:
+        that:
+          - nodes | map(attribute='name') | sort == ['es-1', 'es-2', 'es-node-3']
+          - nodes | map(attribute='version') | unique == [test_version]
+          - node_3.roles | sort == ['data', 'master']
+          - nodes | rejectattr('name', 'equalto', 'es-node-3') | map(attribute='roles') | map('sort') | unique
+            == [['data', 'ingest', 'master', 'remote_cluster_client']]
+          - nodes | map(attribute='plugins') | map('map', attribute='name') | map('list') | unique == [['mapper-size']]
+        fail_msg: "{{ nodes | to_nice_json }}"
+      run_once: true
+
+    - name: Read the managed role, the absent role and the role mapping
+      ansible.builtin.uri:
+        url: "{{ test_api }}/{{ item }}"
+        status_code: [200, 404]
+      loop:
+        - _security/role/molecule_reader
+        - _security/role/molecule_never
+        - _security/role_mapping/molecule_readers
+      register: test_security
+      run_once: true
+
+    - name: Check the role and mapping exist as defined, and the absent role does not
+      vars:
+        role: "{{ test_security.results[0].json.molecule_reader }}"
+        mapping: "{{ test_security.results[2].json.molecule_readers }}"
+      ansible.builtin.assert:
+        that:
+          - role.cluster == ['monitor']
+          - role.indices[0].names == ['molecule-*']
+          - role.metadata.ansible_managed_hash | length == 64
+          - test_security.results[1].status == 404
+          - mapping.roles == ['molecule_reader']
+          - mapping.enabled
+          - mapping.metadata.ansible_managed_hash | length == 64
+      run_once: true
+
+    - name: Read the ingest pipeline
+      ansible.builtin.uri:
+        url: "{{ test_api }}/_ingest/pipeline/molecule-tag"
+      register: test_pipeline
+      run_once: true
+
+    - name: Check the pipeline is defined and carries its hash
+      vars:
+        pipeline: "{{ test_pipeline.json['molecule-tag'] }}"
+      ansible.builtin.assert:
+        that:
+          - pipeline.processors[0].set.field == 'tags'
+          - pipeline._meta.ansible_managed_hash | length == 64
+      run_once: true
+
+    - name: Read the persistent cluster settings
+      ansible.builtin.uri:
+        url: "{{ test_api }}/_cluster/settings?flat_settings=true"
+      register: test_settings
+      run_once: true
+
+    # Allocation is limited to primaries during a rolling restart; it must have
+    # been reset afterwards.
+    - name: Check the GeoIP downloader is off and shard allocation is not limited
+      ansible.builtin.assert:
+        that:
+          - test_settings.json.persistent['ingest.geoip.downloader.enabled'] == 'false'
+          - "'cluster.routing.allocation.enable' not in test_settings.json.persistent"
+        fail_msg: "{{ test_settings.json | to_json }}"
+      run_once: true

@@ -1,0 +1,10 @@
+---
+# Included by side_effect.yml before a change; check_pids.yml compares.
+- name: Read Elasticsearch's main PID
+  ansible.builtin.systemd_service:
+    name: elasticsearch
+  register: test_unit
+
+- name: Remember it
+  ansible.builtin.set_fact:
+    test_pid_before: "{{ test_unit.status.MainPID }}"

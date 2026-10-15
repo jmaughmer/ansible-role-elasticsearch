@@ -1,0 +1,17 @@
+---
+profile: production
+
+exclude_paths:
+  - .ansible/
+  - .github/
+
+# Reported but not fatal: these flag existing tasks in tasks/ (systemctl and rpm
+# queries, keystore and subscription-manager commands, set_fact after a change,
+# lower-case "fapolicyd |" names). Move each rule out of this list once the
+# role's tasks pass it.
+warn_list:
+  - command-instead-of-module
+  - name[casing]
+  - name[template]
+  - no-changed-when
+  - no-handler

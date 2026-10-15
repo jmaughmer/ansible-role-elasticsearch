@@ -1,0 +1,146 @@
+---
+# The images are minimal: without iproute there are no network facts, and the
+# role checks the node certificates with openssl.
+- name: Install what the role expects on a host
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Install iproute and openssl
+      ansible.builtin.dnf:
+        name: [iproute, openssl]
+        state: present
+
+# vm.max_map_count is not namespaced: the containers see the host's value and
+# cannot change it. Elasticsearch's bootstrap checks refuse to start a node
+# bound to a non-loopback address below 262144.
+- name: Check the container host
+  hosts: all
+  gather_facts: true
+  tasks:
+    - name: Read vm.max_map_count
+      ansible.builtin.slurp:
+        src: /proc/sys/vm/max_map_count
+      register: test_max_map_count
+
+    - name: Check vm.max_map_count is high enough for Elasticsearch
+      ansible.builtin.assert:
+        that:
+          - test_max_map_count.content | b64decode | int >= 262144
+        fail_msg: >-
+          vm.max_map_count is {{ test_max_map_count.content | b64decode | trim }} on the machine running the
+          containers; Elasticsearch needs at least 262144. Raise it there first:
+          sudo sysctl -w vm.max_map_count=262144
+        quiet: true
+
+# A test CA and a certificate per node, for the name and address each container
+# got: transport TLS verification is `full`, and nodes reach each other by
+# address. openssl runs in the first container, so the machine running Molecule
+# does not need it; the files are fetched into Molecule's ephemeral directory,
+# where the inventory reads them. They are made again whenever the containers
+# are.
+- name: Create the test certificates
+  hosts: elasticsearch[0]
+  gather_facts: false
+  vars:
+    tls_dir: /root/molecule-tls
+  tasks:
+    - name: Remove certificates made for earlier containers
+      ansible.builtin.file:
+        path: "{{ test_tls_dir }}"
+        state: absent
+      delegate_to: localhost
+      become: false
+
+    - name: Create the certificate directory
+      ansible.builtin.file:
+        path: "{{ tls_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Create the CA
+      ansible.builtin.command:
+        argv: [openssl, req, -x509, -newkey, "rsa:2048", -nodes, -days, "30",
+               -subj, /CN=Molecule test CA, -keyout, ca.key, -out, ca.crt]
+        chdir: "{{ tls_dir }}"
+        creates: ca.crt
+
+    - name: Write each node's certificate extensions
+      ansible.builtin.copy:
+        dest: "{{ tls_dir }}/{{ item }}.ext"
+        content: |
+          basicConstraints = CA:FALSE
+          extendedKeyUsage = serverAuth, clientAuth
+          subjectAltName = DNS:{{ item }}, DNS:localhost, IP:{{ hostvars[item].ansible_facts.default_ipv4.address }}, IP:127.0.0.1
+        mode: "0600"
+      loop: "{{ groups['elasticsearch'] }}"
+
+    - name: Create each node's key and signing request
+      ansible.builtin.command:
+        argv: [openssl, req, -newkey, "rsa:2048", -nodes, -subj, "/CN={{ item }}",
+               -keyout, "{{ item }}.key", -out, "{{ item }}.csr"]
+        chdir: "{{ tls_dir }}"
+        creates: "{{ item }}.csr"
+      loop: "{{ groups['elasticsearch'] }}"
+
+    - name: Sign each node's certificate
+      ansible.builtin.command:
+        argv: [openssl, x509, -req, -in, "{{ item }}.csr", -CA, ca.crt, -CAkey, ca.key, -CAcreateserial,
+               -days, "30", -extfile, "{{ item }}.ext", -out, "{{ item }}.crt"]
+        chdir: "{{ tls_dir }}"
+        creates: "{{ item }}.crt"
+      loop: "{{ groups['elasticsearch'] }}"
+
+    # PKCS#8 with AES, which Elasticsearch reads and FIPS hosts accept
+    - name: Encrypt a copy of each node's key
+      ansible.builtin.command:
+        argv: [openssl, pkcs8, -topk8, -v2, aes-256-cbc, -in, "{{ item }}.key",
+               -out, "{{ item }}.encrypted.key", -passout, env:TEST_KEY_PASSPHRASE]
+        chdir: "{{ tls_dir }}"
+        creates: "{{ item }}.encrypted.key"
+      environment:
+        TEST_KEY_PASSPHRASE: "{{ test_key_passphrase }}"
+      loop: "{{ groups['elasticsearch'] }}"
+
+    - name: Fetch the CA certificate and the node files
+      ansible.builtin.fetch:
+        src: "{{ tls_dir }}/{{ item }}"
+        dest: "{{ test_tls_dir }}/"
+        flat: true
+      loop: >-
+        {{ ['ca.crt']
+           + groups['elasticsearch'] | product(['.crt', '.key', '.encrypted.key']) | map('join') | list }}
+
+    - name: Remove the certificates from the container
+      ansible.builtin.file:
+        path: "{{ tls_dir }}"
+        state: absent
+
+# Hosts whose ssl_certificates entry gives paths (test_tls_on_host in
+# host_vars) get the files ahead of the role, the way ansible-role-elastic-tls
+# leaves them.
+- name: Place certificates on hosts that read them from files
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Copy the CA, certificate and key
+      when: test_tls_on_host | default(false)
+      block:
+        - name: Create the directory
+          ansible.builtin.file:
+            path: "{{ test_tls_host_dir }}"
+            state: directory
+            owner: root
+            group: root
+            mode: "0700"
+
+        - name: Copy the files
+          ansible.builtin.copy:
+            src: "{{ test_tls_dir }}/{{ item.src }}"
+            dest: "{{ test_tls_host_dir }}/{{ item.dest }}"
+            owner: root
+            group: root
+            mode: "0600"
+          loop:
+            - { src: ca.crt, dest: ca.crt }
+            - { src: "{{ inventory_hostname }}.crt", dest: node.crt }
+            - { src: "{{ inventory_hostname }}.key", dest: node.key }

@@ -1,0 +1,13 @@
+---
+# Master-eligible without ingest, under a node name of its own
+elasticsearch_node_name: es-node-3
+elasticsearch_node_roles: [master, data]
+
+# An encrypted key: the role puts the passphrase in the keystore
+ssl_certificates:
+  - name: es-3
+    certificate:
+      content: "{{ lookup('ansible.builtin.file', test_tls_dir ~ '/es-3.crt') }}"
+    key:
+      content: "{{ lookup('ansible.builtin.file', test_tls_dir ~ '/es-3.encrypted.key') }}"
+      passphrase: "{{ test_key_passphrase }}"

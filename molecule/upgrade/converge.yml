@@ -1,0 +1,8 @@
+---
+# The cluster starts on test_upgrade_from (an earlier minor release than the
+# role's default elasticsearch_version; move it on when the default moves).
+- name: Converge on the older release
+  ansible.builtin.import_playbook: ../default/converge.yml
+  vars:
+    elasticsearch_version: "{{ test_upgrade_from }}"
+    test_upgrade_from: "9.4.8"

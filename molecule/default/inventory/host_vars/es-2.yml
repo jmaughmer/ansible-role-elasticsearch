@@ -1,0 +1,13 @@
+---
+# Certificate, key and CA as files already on the host (copied there by
+# prepare.yml), as with certificates issued by ansible-role-elastic-tls
+test_tls_on_host: true
+
+ssl_certificates:
+  - name: es-2
+    certificate:
+      path: "{{ test_tls_host_dir }}/node.crt"
+    key:
+      path: "{{ test_tls_host_dir }}/node.key"
+elasticsearch_ssl_ca_certificate: ""
+elasticsearch_ssl_ca_certificate_path: "{{ test_tls_host_dir }}/ca.crt"

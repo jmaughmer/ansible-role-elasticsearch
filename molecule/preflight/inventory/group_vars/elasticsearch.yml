@@ -1,0 +1,21 @@
+---
+# Settings preflight accepts. Each case in converge.yml overrides some of them
+# with play variables, which take precedence over these.
+#
+# elasticsearch_no_log keeps its default (true): the checks that handle
+# secrets must fail without printing them.
+elasticsearch_elastic_password: preflight-secret-password
+ssl_certificates:
+  - name: "{{ inventory_hostname }}"
+    certificate:
+      content: NOT-CHECKED-BY-PREFLIGHT
+    key:
+      content: PREFLIGHT-SECRET-KEY
+elasticsearch_ssl_ca_certificate: NOT-CHECKED-BY-PREFLIGHT
+
+# Values the cases use; no failure may print one (case.yml checks)
+test_secrets:
+  - preflight-secret-password
+  - PREFLIGHT-SECRET-KEY
+  - tiny5
+  - preflight-bind-secret

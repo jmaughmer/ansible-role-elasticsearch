@@ -1,0 +1,349 @@
+---
+# Each case is a play of its own (case.yml), with the settings under test as
+# play variables over the accepted ones in inventory/group_vars. test_case:
+#   name    what the case is
+#   task    regex for the preflight task that has to fail; absent means the
+#           case must pass
+#   expect  regex the failure message has to match
+# The checks that handle secrets run under no_log, which only hides what is
+# printed: the failure case.yml records still has the message. Each one is
+# checked for the values in test_secrets.
+
+- name: Valid settings pass
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: valid settings pass
+
+- name: Unsupported distribution
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: distribution not in elasticsearch_supported_distributions
+      task: Verify operating system is supported
+      expect: Unsupported platform Rocky
+    elasticsearch_supported_distributions: [RedHat, AlmaLinux]
+
+- name: Host outside the cluster group
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: host outside the cluster group
+      task: Verify host is a member of the cluster group
+      expect: is not in inventory group 'ghosts'
+    elasticsearch_cluster_group: ghosts
+
+- name: Cluster group that does not exist
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: cluster group that does not exist
+      task: Verify host is a member of the cluster group
+      expect: is not in inventory group 'nosuchgroup'
+    elasticsearch_cluster_group: nosuchgroup
+
+- name: Version without a patch release
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: version without a patch release
+      task: Verify Elasticsearch version
+      expect: must be an exact 9\.x\.y release
+    elasticsearch_version: "9.5"
+
+- name: Another major version
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: another major version
+      task: Verify Elasticsearch version
+      expect: must be an exact 9\.x\.y release
+    elasticsearch_version: "8.19.0"
+
+- name: Unknown package source
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: unknown package source
+      task: Verify package source settings
+      expect: must be elastic, satellite or none
+    elasticsearch_repo_source: local
+
+- name: Satellite without a repository id
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: satellite without a repository id
+      task: Verify package source settings
+      expect: Satellite needs elasticsearch_satellite_repo_id
+    elasticsearch_repo_source: satellite
+
+- name: Satellite override of baseurl
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: satellite content override of baseurl
+      task: Verify package source settings
+      expect: cannot set enabled .*, baseurl or name
+    elasticsearch_repo_source: satellite
+    elasticsearch_satellite_repo_id: ACME_Elastic_Elastic_9_x
+    elasticsearch_satellite_repo_overrides: { baseurl: "https://mirror.example.com/" }
+
+- name: Replaced variable elasticsearch_manage_repo
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: replaced variable elasticsearch_manage_repo
+      task: Verify package source settings
+      expect: elasticsearch_manage_repo was replaced
+    elasticsearch_manage_repo: false
+
+- name: Short elastic password
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: elastic password shorter than 6 characters
+      task: Verify elastic user password
+      expect: must be defined \(vaulted\) and at least 6 characters
+    elasticsearch_elastic_password: tiny5
+
+- name: Unknown node role
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: unknown node role
+      task: Verify node roles
+      expect: Invalid elasticsearch_node_roles .*Valid roles
+    elasticsearch_node_roles: [master, coordinator]
+
+- name: Node roles as a string
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: node roles as a string
+      task: Verify node roles
+      expect: Invalid elasticsearch_node_roles
+    elasticsearch_node_roles: master
+
+- name: Heap size with a unit Java does not take
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: heap size with a unit Java does not take
+      task: Verify JVM heap size
+      expect: elasticsearch_heap_size must be 'auto' or a size
+    elasticsearch_heap_size: 4GB
+
+- name: No certificate entry for the host
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: no certificate entry for the host
+      task: Verify TLS material for this node
+      expect: No usable entry named 'es-p1' in ssl_certificates
+    ssl_certificates: []
+
+- name: Certificate entry without a key
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: certificate entry without a key
+      task: Verify TLS material for this node
+      expect: No usable entry named 'es-p1' in ssl_certificates
+    ssl_certificates:
+      - name: "{{ inventory_hostname }}"
+        certificate:
+          content: NOT-CHECKED-BY-PREFLIGHT
+
+- name: No CA certificate
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: no CA certificate
+      task: Verify TLS material for this node
+      expect: No usable entry named 'es-p1' in ssl_certificates
+    elasticsearch_ssl_ca_certificate: ""
+
+- name: Firewall port without a protocol
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: firewall port without a protocol
+      task: Verify firewall settings
+      expect: entries must look like
+    elasticsearch_firewall_ports: ["9600"]
+
+- name: Firewall services as a string
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: firewall services as a string
+      task: Verify firewall settings
+      expect: elasticsearch_firewall_services must be a list
+    elasticsearch_firewall_services: https
+
+- name: SELinux setting that is not a boolean
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: SELinux setting that is not auto or a boolean
+      task: Verify hardening settings
+      expect: must be auto, true or false
+    elasticsearch_selinux_manage: sometimes
+
+- name: FIPS mode without a pbkdf2 hash
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: FIPS mode without a pbkdf2 password hash
+      task: Verify hardening settings
+      expect: must be a pbkdf2\s+variant
+    elasticsearch_fips_mode: true
+
+- name: Active Directory without servers
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: Active Directory without servers
+      task: Verify Active Directory settings
+      expect: "Active Directory is enabled: elasticsearch_ad_domain_name and elasticsearch_ad_urls"
+    elasticsearch_ad_enabled: true
+    elasticsearch_ad_domain_name: example.com
+
+- name: Active Directory bind DN without a password
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: Active Directory bind DN without a password
+      task: Verify Active Directory settings
+      expect: "Active Directory is enabled: elasticsearch_ad_domain_name and elasticsearch_ad_urls"
+    elasticsearch_ad_enabled: true
+    elasticsearch_ad_domain_name: example.com
+    elasticsearch_ad_urls: ["ldaps://dc1.example.com:636"]
+    elasticsearch_ad_bind_dn: svc-elasticsearch@example.com
+
+- name: Active Directory with a bind password passes
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: Active Directory with a bind password passes
+    elasticsearch_ad_enabled: true
+    elasticsearch_ad_domain_name: example.com
+    elasticsearch_ad_urls: ["ldaps://dc1.example.com:636"]
+    elasticsearch_ad_bind_dn: svc-elasticsearch@example.com
+    elasticsearch_ad_bind_password: preflight-bind-secret
+
+- name: Plugin without a name
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: plugin given as a dict without a name
+      task: Verify plugin definitions
+      expect: Plugins must be a name string or a dict
+    elasticsearch_plugins:
+      - source: https://repo.example.com/my-plugin-9.5.4.zip
+
+- name: Security role without a definition
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: security role without a definition
+      task: Verify security role and role mapping definitions
+      expect: Each role / role mapping needs
+    elasticsearch_security_roles:
+      - name: no_definition
+
+- name: Role mapping with an unknown state
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: role mapping with an unknown state
+      task: Verify security role and role mapping definitions
+      expect: Each role / role mapping needs
+    elasticsearch_security_role_mappings:
+      - name: mapping
+        state: deleted
+        definition: { enabled: true, roles: [], rules: { field: { username: x } } }
+
+- name: Pipeline name with a space
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: ingest pipeline name with a space
+      task: Verify ingest pipeline definitions
+      expect: Each ingest pipeline needs a name
+    elasticsearch_ingest_pipelines:
+      - name: my pipeline
+        definition: { processors: [] }
+
+- name: GeoIP database with both src and url
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: GeoIP database with both src and url
+      task: Verify GeoIP database definitions
+      expect: exactly one of src or url
+    elasticsearch_geoip_databases:
+      - name: GeoLite2-City.mmdb
+        src: geoip/GeoLite2-City.mmdb
+        url: https://mirror.example.com/GeoLite2-City.mmdb
+
+- name: GeoIP database in a subdirectory
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: GeoIP database name with a directory
+      task: Verify GeoIP database definitions
+      expect: file name ending in \.mmdb \(no directories\)
+    elasticsearch_geoip_databases:
+      - name: geoip/GeoLite2-City.mmdb
+        src: geoip/GeoLite2-City.mmdb
+
+- name: GeoIP checksum without a url
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: GeoIP checksum without a url
+      task: Verify GeoIP database definitions
+      expect: checksum only with url
+    elasticsearch_geoip_databases:
+      - name: GeoLite2-City.mmdb
+        src: geoip/GeoLite2-City.mmdb
+        checksum: "sha256:0000"
+
+- name: GeoIP poll interval in words
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: GeoIP poll interval in words
+      task: Verify GeoIP settings
+      expect: poll_interval must be empty or a time value
+    elasticsearch_geoip_downloader_poll_interval: 3 days
+
+- name: No master-eligible node
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: no master-eligible node in the cluster group
+      task: Verify cluster topology and restart batch sizes
+      expect: needs at least one master-eligible node
+    elasticsearch_default_node_roles: [data, ingest]
+
+- name: Master batch that would lose quorum
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: master batch of 2 out of 3 master-eligible nodes
+      task: Verify cluster topology and restart batch sizes
+      expect: must be less than half of the 3 master-eligible nodes
+    elasticsearch_cluster_group: three_masters
+    elasticsearch_rolling_restart_master_batch_size: 2
+
+- name: Restart batch of zero
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case:
+      name: restart batch size of zero
+      task: Verify cluster topology and restart batch sizes
+      expect: batch sizes must be >= 1
+    elasticsearch_rolling_restart_batch_size: 0

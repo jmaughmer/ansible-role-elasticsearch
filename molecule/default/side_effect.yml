@@ -1,0 +1,186 @@
+---
+# Runs after the idempotence check, on the converged cluster:
+#   1. index a document through the managed pipeline, into an index with a
+#      replica on every node, so green means every copy is back after restarts;
+#   2. a JVM option change with elasticsearch_restart_on_change off: flagged,
+#      reported, and no node restarted;
+#   3. a node attribute change: a rolling restart, one node at a time in
+#      inventory order, after which every node runs the new settings, including
+#      the JVM option from step 2. A changed role definition and a pipeline
+#      set to absent are applied through the API in the same run;
+#   4. the converge settings again (another rolling restart), for verify.yml.
+- name: Index a document through the managed pipeline
+  hosts: elasticsearch
+  become: true
+  gather_facts: false
+  module_defaults: &api
+    ansible.builtin.uri:
+      url_username: elastic
+      url_password: "{{ elasticsearch_elastic_password }}"
+      force_basic_auth: true
+      ca_path: /etc/elasticsearch/tls/ca.crt
+      timeout: 30
+  vars:
+    test_api: "https://{{ inventory_hostname }}:9200"
+  tasks:
+    - name: Create an index with a copy on every node
+      ansible.builtin.uri:
+        url: "{{ test_api }}/molecule-data"
+        method: PUT
+        body_format: json
+        body:
+          settings:
+            number_of_shards: 1
+            number_of_replicas: 2
+      run_once: true
+
+    - name: Index a document through the pipeline
+      ansible.builtin.uri:
+        url: "{{ test_api }}/molecule-data/_doc/1?pipeline=molecule-tag&refresh=true"
+        method: PUT
+        body_format: json
+        body:
+          message: hello
+        status_code: 201
+      run_once: true
+
+    - name: Read the document back
+      ansible.builtin.uri:
+        url: "{{ test_api }}/molecule-data/_doc/1"
+      register: test_doc
+      failed_when: test_doc.json._source.tags != ['molecule']
+      run_once: true
+
+    - name: Wait for every copy to be assigned
+      ansible.builtin.uri:
+        url: "{{ test_api }}/_cluster/health/molecule-data?wait_for_status=green&timeout=60s"
+      register: test_health
+      failed_when: test_health.json.status != 'green'
+      run_once: true
+
+- name: Change the JVM options with restarts turned off
+  hosts: elasticsearch
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Remember each node's process
+      ansible.builtin.include_tasks: tasks/record_pids.yml
+
+    - name: Apply the role
+      ansible.builtin.include_role:
+        name: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+      vars:
+        elasticsearch_restart_on_change: false
+        elasticsearch_jvm_options: ["-Dmolecule.marker=step2"]
+
+    - name: Check a restart was needed but none was planned
+      ansible.builtin.assert:
+        that:
+          - _es_restart_required | bool
+          - not (_es_needs_rolling | bool)
+          - hostvars[ansible_play_hosts_all[0]]._es_roll_batches == []
+
+    - name: Check no node was restarted
+      ansible.builtin.include_tasks: tasks/check_pids.yml
+      vars:
+        test_expect_restart: false
+
+- name: Change a node attribute, the security role and the pipeline
+  hosts: elasticsearch
+  become: true
+  gather_facts: false
+  module_defaults: *api
+  vars:
+    test_api: "https://{{ inventory_hostname }}:9200"
+  tasks:
+    - name: Remember each node's process
+      ansible.builtin.include_tasks: tasks/record_pids.yml
+
+    - name: Apply the role
+      ansible.builtin.include_role:
+        name: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+      vars:
+        elasticsearch_jvm_options: ["-Dmolecule.marker=step2"]
+        elasticsearch_node_attributes:
+          molecule: rolled
+        elasticsearch_security_roles:
+          - name: molecule_reader
+            definition:
+              cluster: [monitor, manage_index_templates]
+              indices:
+                - names: ["molecule-*"]
+                  privileges: [read, view_index_metadata]
+        elasticsearch_ingest_pipelines:
+          - name: molecule-tag
+            state: absent
+
+    # All three nodes are master-eligible and the batch size is 1
+    - name: Check the nodes were restarted one at a time, in inventory order
+      ansible.builtin.assert:
+        that:
+          - hostvars[ansible_play_hosts_all[0]]._es_roll_batches == ansible_play_hosts_all | map('split') | list
+        fail_msg: "Restart batches: {{ hostvars[ansible_play_hosts_all[0]]._es_roll_batches }}"
+      run_once: true
+
+    - name: Check every node was restarted
+      ansible.builtin.include_tasks: tasks/check_pids.yml
+      vars:
+        test_expect_restart: true
+
+    - name: Read the running nodes' attributes and JVM arguments
+      ansible.builtin.uri:
+        url: "{{ test_api }}/_nodes?filter_path=nodes.*.name,nodes.*.attributes,nodes.*.jvm.input_arguments"
+      register: test_nodes
+      run_once: true
+
+    - name: Check every node runs the new attribute and the JVM option held back in step 2
+      vars:
+        nodes: "{{ test_nodes.json.nodes.values() | list }}"
+      ansible.builtin.assert:
+        that:
+          - nodes | length == 3
+          - nodes | map(attribute='attributes') | map(attribute='molecule', default='') | unique == ['rolled']
+          - nodes | rejectattr('jvm.input_arguments', 'contains', '-Dmolecule.marker=step2') | list | length == 0
+        fail_msg: "{{ nodes | to_nice_json }}"
+      run_once: true
+
+    - name: Check the cluster is green with the document intact
+      ansible.builtin.uri:
+        url: "{{ test_api }}/molecule-data/_count"
+      register: test_count
+      failed_when: test_count.json.count != 1
+      run_once: true
+
+    - name: Read the role and the pipeline
+      ansible.builtin.uri:
+        url: "{{ test_api }}/{{ item }}"
+        status_code: [200, 404]
+      loop:
+        - _security/role/molecule_reader
+        - _ingest/pipeline/molecule-tag
+      register: test_api_objects
+      run_once: true
+
+    - name: Check the role was updated and the pipeline deleted
+      ansible.builtin.assert:
+        that:
+          - test_api_objects.results[0].json.molecule_reader.cluster == ['monitor', 'manage_index_templates']
+          - test_api_objects.results[1].status == 404
+      run_once: true
+
+- name: Go back to the converge settings
+  hosts: elasticsearch
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Remember each node's process
+      ansible.builtin.include_tasks: tasks/record_pids.yml
+
+    - name: Apply the role
+      ansible.builtin.include_role:
+        name: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+
+    - name: Check every node was restarted
+      ansible.builtin.include_tasks: tasks/check_pids.yml
+      vars:
+        test_expect_restart: true
