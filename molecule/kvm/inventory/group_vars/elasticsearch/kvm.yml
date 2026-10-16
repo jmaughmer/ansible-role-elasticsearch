@@ -1,0 +1,4 @@
+---
+# On top of main.yml (the default scenario's group_vars): each node is a VM
+# with its own kernel, so the role manages vm.max_map_count as on a real host.
+elasticsearch_manage_sysctl: true

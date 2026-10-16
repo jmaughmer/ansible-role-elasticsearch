@@ -615,6 +615,22 @@ Not covered by containers: `vm.max_map_count` (`elasticsearch_manage_sysctl`), m
 firewalld, SELinux file contexts, fapolicyd trust entries, Satellite repositories, Active Directory,
 and licenses. Those need virtual machines or the services themselves.
 
+### On KVM virtual machines
+
+[`molecule/kvm/`](molecule/kvm/) runs the default scenario on real AlmaLinux 10 virtual machines
+instead of containers: the same hosts, groups, playbooks and inventory, one VM per host, on local
+KVM/libvirt (`qemu:///system`). Each VM has its own kernel, so SELinux is enforcing and settings such
+as `vm.max_map_count` are the VM's own. Overrides for the VMs go in
+`molecule/kvm/inventory/group_vars/<group>/kvm.yml`.
+
+```bash
+molecule test -s kvm
+```
+
+The machine running Molecule needs libvirt, `virt-install`, `qemu-img` and `xorriso`, and its user
+must be able to manage `qemu:///system`. The AlmaLinux 10 cloud image downloads once, checksum
+verified, to `/var/lib/libvirt/images/molecule`; each VM gets a throwaway disk on top of it.
+
 ## Role layout
 
 ```
