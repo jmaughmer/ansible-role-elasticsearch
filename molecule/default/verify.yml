@@ -105,8 +105,31 @@
           - test_jvm.content | b64decode is search('^-Xms512m$', multiline=True)
           - test_jvm.content | b64decode is search('^-Xmx512m$', multiline=True)
 
+    - name: Check whether the keystore has a password
+      ansible.builtin.command: /usr/share/elasticsearch/bin/elasticsearch-keystore has-passwd
+      register: test_keystore_has_passwd
+      changed_when: false
+      failed_when: test_keystore_has_passwd.rc != (0 if test_keystore_password is defined else 1)
+
+    - name: Read the keystore passphrase file
+      ansible.builtin.stat:
+        path: "{{ test_conf_dir }}/elasticsearch.keystore.passphrase"
+      register: test_passphrase_file
+
+    - name: Check the passphrase file exists only with a keystore password
+      ansible.builtin.assert:
+        that: >-
+          (test_passphrase_file.stat.exists
+           and test_passphrase_file.stat.pw_name == 'root'
+           and test_passphrase_file.stat.gr_name == 'elasticsearch'
+           and test_passphrase_file.stat.mode == '0640')
+          if test_keystore_password is defined else not test_passphrase_file.stat.exists
+        fail_msg: "{{ test_passphrase_file.stat | to_json }}"
+
     - name: List the keystore
-      ansible.builtin.command: /usr/share/elasticsearch/bin/elasticsearch-keystore list
+      ansible.builtin.command:
+        cmd: /usr/share/elasticsearch/bin/elasticsearch-keystore list
+        stdin: "{{ test_keystore_password | default(omit) }}"
       register: test_keystore
       changed_when: false
 
@@ -143,11 +166,14 @@
         src: /etc/systemd/system/elasticsearch.service.d/override.conf
       register: test_override
 
-    - name: Check the drop-in has the start timeout and no memlock limit
+    - name: Check the drop-in has the start timeout, no memlock limit, and the passphrase file only with a keystore password
       ansible.builtin.assert:
         that:
           - test_override.content | b64decode is search('^TimeoutStartSec=900$', multiline=True)
           - test_override.content | b64decode is not search('LimitMEMLOCK')
+          - >-
+            (test_override.content | b64decode is search('^Environment="ES_KEYSTORE_PASSPHRASE_FILE=', multiline=True))
+            == (test_keystore_password is defined)
 
 - name: Verify the cluster
   hosts: elasticsearch

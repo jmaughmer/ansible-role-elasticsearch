@@ -71,6 +71,16 @@
     quiet: true
   no_log: "{{ elasticsearch_no_log }}"
 
+# elasticsearch-keystore reads the password as one line of standard input.
+- name: Preflight | Verify keystore password
+  ansible.builtin.assert:
+    that:
+      - "(elasticsearch_keystore_password | string) is not search('[\\r\\n]')"
+      - "(elasticsearch_keystore_previous_password | string) is not search('[\\r\\n]')"
+    fail_msg: elasticsearch_keystore_password and elasticsearch_keystore_previous_password must not contain line breaks.
+    quiet: true
+  no_log: "{{ elasticsearch_no_log }}"
+
 - name: Preflight | Verify node roles
   ansible.builtin.assert:
     that:
