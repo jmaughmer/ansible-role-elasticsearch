@@ -124,7 +124,7 @@
            and test_passphrase_file.stat.gr_name == 'elasticsearch'
            and test_passphrase_file.stat.mode == '0640')
           if test_keystore_password is defined else not test_passphrase_file.stat.exists
-        fail_msg: "{{ test_passphrase_file.stat }}"
+        fail_msg: "{{ test_passphrase_file.stat | to_json }}"
 
     - name: List the keystore
       ansible.builtin.command:
