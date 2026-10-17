@@ -97,7 +97,7 @@
         lock_timeout: "{{ elasticsearch_dnf_lock_timeout }}"
         enablerepo: "{{ _es_package_repos if _es_package_repos | length > 0 else omit }}"
       delegate_to: "{{ item }}"
-      loop: "{{ _es_batch_upgrades | select('in', _es_dnf_hosts) | list }}"
+      loop: "{{ _es_batch_upgrades | map('extract', hostvars) | selectattr('_es_pkg_mgr', 'equalto', 'dnf') | map(attribute='inventory_hostname') | list }}"
       async: "{{ 0 if ansible_check_mode else elasticsearch_download_async_timeout }}"
       poll: "{{ elasticsearch_download_async_poll }}"
       register: _es_roll_upgrade
@@ -114,7 +114,7 @@
         cache_valid_time: 3600
         lock_timeout: "{{ elasticsearch_dnf_lock_timeout }}"
       delegate_to: "{{ item }}"
-      loop: "{{ _es_batch_upgrades | reject('in', _es_dnf_hosts) | list }}"
+      loop: "{{ _es_batch_upgrades | map('extract', hostvars) | selectattr('_es_pkg_mgr', 'equalto', 'apt') | map(attribute='inventory_hostname') | list }}"
       async: "{{ 0 if ansible_check_mode else elasticsearch_download_async_timeout }}"
       poll: "{{ elasticsearch_download_async_poll }}"
       register: _es_roll_upgrade_apt
@@ -127,7 +127,7 @@
         name: elasticsearch
         selection: hold
       delegate_to: "{{ item }}"
-      loop: "{{ _es_batch_upgrades | reject('in', _es_dnf_hosts) | list }}"
+      loop: "{{ _es_batch_upgrades | map('extract', hostvars) | selectattr('_es_pkg_mgr', 'equalto', 'apt') | map(attribute='inventory_hostname') | list }}"
 
     - name: Rolling restart | Reinstall plugins on upgraded nodes
       ansible.builtin.include_tasks: plugins_sync.yml
