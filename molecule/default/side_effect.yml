@@ -7,8 +7,10 @@
 #   3. a node attribute change: a rolling restart, one node at a time in
 #      inventory order, after which every node runs the new settings, including
 #      the JVM option from step 2. A changed role definition and a pipeline
-#      set to absent are applied through the API in the same run;
-#   4. the converge settings again (another rolling restart), for verify.yml.
+#      set to absent are applied through the API in the same run, and es-3's
+#      keystore password changes, so es-3 restarts with the new passphrase;
+#   4. the converge settings again (another rolling restart, and es-3's
+#      keystore password changed back), for verify.yml.
 - name: Index a document through the managed pipeline
   hosts: elasticsearch
   become: true
@@ -113,6 +115,8 @@
         elasticsearch_ingest_pipelines:
           - name: molecule-tag
             state: absent
+        elasticsearch_keystore_password: "{{ test_keystore_password_changed | default('') }}"
+        elasticsearch_keystore_previous_password: "{{ test_keystore_password | default('') }}"
 
     # All three nodes are master-eligible and the batch size is 1
     - name: Check the nodes were restarted one at a time, in inventory order
@@ -126,6 +130,13 @@
       ansible.builtin.include_tasks: tasks/check_pids.yml
       vars:
         test_expect_restart: true
+
+    - name: Open es-3's keystore with the changed password
+      ansible.builtin.command:
+        cmd: /usr/share/elasticsearch/bin/elasticsearch-keystore list
+        stdin: "{{ test_keystore_password_changed }}"
+      changed_when: false
+      when: test_keystore_password_changed is defined
 
     - name: Read the running nodes' attributes and JVM arguments
       ansible.builtin.uri:
@@ -179,6 +190,8 @@
     - name: Apply the role
       ansible.builtin.include_role:
         name: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+      vars:
+        elasticsearch_keystore_previous_password: "{{ test_keystore_password_changed | default('') }}"
 
     - name: Check every node was restarted
       ansible.builtin.include_tasks: tasks/check_pids.yml
