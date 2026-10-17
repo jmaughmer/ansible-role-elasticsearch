@@ -1,10 +1,10 @@
 # ansible-role-elasticsearch
 
-An Ansible role that installs and configures an Elasticsearch 9.x cluster, single-node or multi-node, on RHEL, AlmaLinux and Rocky Linux 9 and 10.
+An Ansible role that installs and configures an Elasticsearch 9.x cluster, single-node or multi-node, on RHEL, AlmaLinux and Rocky Linux 9 and 10, and on Ubuntu 24.04 and 26.04.
 
 What it does:
 
-- Installs a pinned Elasticsearch RPM from the Elastic repository. The repo is left disabled so a normal `dnf update` can't upgrade it.
+- Installs a pinned Elasticsearch package from the Elastic repository. On Enterprise Linux the repo is left disabled so a normal `dnf update` can't upgrade it; on Ubuntu the package is held, so `apt upgrade` leaves it alone.
 - Sets per-node roles and JVM heap from `host_vars`.
 - Sets up TLS on the HTTP and transport layers using PEM certificates from the `ssl_certificates` host variable. The private key is vaulted.
 - Configures an Active Directory realm, with the bind password stored in the Elasticsearch keystore.
@@ -17,13 +17,13 @@ What it does:
 
 ## Requirements
 
-- **Control node:** ansible-core 2.15 or later, plus the `ansible.posix` collection:
+- **Control node:** ansible-core 2.15 or later, plus the `ansible.posix` and `community.general` collections:
 
   ```bash
   ansible-galaxy collection install -r requirements.yml
   ```
 
-- **Target hosts:** RHEL, AlmaLinux or Rocky Linux 9 or 10 (see [Supported platforms](#supported-platforms)), with `openssl` installed. On STIG-hardened hosts see [Hardened hosts](#hardened-hosts-fips-selinux-fapolicyd) — fapolicyd has to allow Ansible before anything runs. They need a package source: Elastic's repository (`artifacts.elastic.co`) or a mirror, or a Red Hat Satellite or Katello server. See [Package source](#package-source).
+- **Target hosts:** RHEL, AlmaLinux or Rocky Linux 9 or 10, or Ubuntu 24.04 or 26.04 (see [Supported platforms](#supported-platforms)), with `openssl` installed. On STIG-hardened hosts see [Hardened hosts](#hardened-hosts-fips-selinux-fapolicyd) — fapolicyd has to allow Ansible before anything runs. They need a package source: Elastic's repository (`artifacts.elastic.co`) or a mirror, or (Enterprise Linux only) a Red Hat Satellite or Katello server. See [Package source](#package-source).
 - **Name resolution** between nodes: inventory hostnames are used for discovery and API calls unless you override them.
 - **Certificates.** Each node certificate must:
   - include the node's inventory hostname (or `elasticsearch_api_host`) in its SAN, because `verification_mode: full` is the default;
@@ -33,13 +33,15 @@ What it does:
 
 ## Supported platforms
 
-| Distribution | `ansible_facts['distribution']` | Major versions |
+| Distribution | `ansible_facts['distribution']` | Versions |
 |---|---|---|
 | Red Hat Enterprise Linux | `RedHat` | 9, 10 |
 | AlmaLinux | `AlmaLinux` | 9, 10 |
 | Rocky Linux | `Rocky` | 9, 10 |
+| Ubuntu | `Ubuntu` | 24.04, 26.04 |
 
-- **Same tasks everywhere.** The role has no distribution-specific tasks, and Elasticsearch comes from Elastic's RPM packages on all of them.
+- **Package managers.** Elasticsearch comes from Elastic's RPM packages through dnf on Enterprise Linux, and from Elastic's Debian packages through apt on Ubuntu. Everything else, from configuration to rolling restarts, runs the same tasks on both, and one cluster can mix them.
+- **Ubuntu differences.** The firewall is ufw instead of firewalld (see [Firewall](#firewall)). SELinux and fapolicyd are normally absent, so their `auto` settings do nothing. Satellite is Enterprise Linux only.
 - **Other distributions.** Preflight stops the run on any other distribution or major version. To try another Enterprise Linux 9 or 10 rebuild, such as CentOS Stream (`CentOS`) or Oracle Linux (`OracleLinux`), add its distribution fact to `elasticsearch_supported_distributions`. Those aren't tested.
 - **Satellite or Katello.** `elasticsearch_repo_source: satellite` needs `subscription-manager` and a host registered to the server. RHEL hosts can use Red Hat Satellite or Katello. AlmaLinux and Rocky Linux hosts are normally registered to Katello; check your Satellite version's supported host operating systems before using it for them.
 - **Elastic's support.** See [Elastic's support matrix](https://www.elastic.co/support/matrix) for the operating systems Elastic supports for your Elasticsearch release.
@@ -70,9 +72,11 @@ ansible-galaxy install -r requirements.yml
 
 | Value | Package source |
 |---|---|
-| `elastic` (default) | Elastic's public repository, or a mirror set with `elasticsearch_repo_baseurl` and `elasticsearch_repo_gpgkey`. The role writes a disabled repository file and enables it only for its own dnf tasks, so a routine `dnf update` never upgrades Elasticsearch. |
-| `satellite` | A repository synced into Red Hat Satellite or Katello, delivered to registered hosts through subscription-manager. See [Red Hat Satellite or Katello](#red-hat-satellite-or-katello). |
+| `elastic` (default) | Elastic's public repository, or a mirror set with `elasticsearch_repo_baseurl` and `elasticsearch_repo_gpgkey`. On Enterprise Linux the role writes a disabled repository file and enables it only for its own dnf tasks, so a routine `dnf update` never upgrades Elasticsearch. On Ubuntu it saves the key to `/etc/apt/keyrings/elastic.asc`, adds `/etc/apt/sources.list.d/elastic-9.x.sources` (suite `stable`, component `main`) and holds the package, so a routine `apt upgrade` never upgrades it. The default `elasticsearch_repo_baseurl` is the yum or apt repository to match the host. |
+| `satellite` | Enterprise Linux only. A repository synced into Red Hat Satellite or Katello, delivered to registered hosts through subscription-manager. See [Red Hat Satellite or Katello](#red-hat-satellite-or-katello). |
 | `none` | Repositories you manage yourself. The role installs from whatever is enabled on the host. |
+
+**Ubuntu and other Elastic roles.** The kibana, logstash and elastic_fleet roles write the same key file and apt source, so a host running more than one of them keeps a single definition. apt refuses two sources for one URL with different keys, so remove any Elastic source added by hand (for example `elastic-9.x.list` from Elastic's install guide) first.
 
 **Version check.** Before installing or upgrading, the role checks that `elasticsearch_version` is available from the package source, so a missing version fails before anything changes. You can turn this off with `elasticsearch_package_version_check`.
 
@@ -412,17 +416,19 @@ A retried task can take up to retries × (delay + attempt time) before it gives 
 ## Firewall
 
 With `elasticsearch_manage_firewall` (on by default) the role opens the HTTP and transport ports in
-firewalld, permanently and immediately, in `elasticsearch_firewall_zone`:
+firewalld, permanently and immediately, in `elasticsearch_firewall_zone`. On a host running ufw
+instead (Ubuntu), it adds `allow` rules for the same ports:
 
 | Variable | Default | |
 |---|---|---|
 | `elasticsearch_manage_firewall` | `true` | Set to `false` to manage the firewall yourself |
-| `elasticsearch_firewall_zone` | `public` | Zone the rules go in |
+| `elasticsearch_firewall_zone` | `public` | firewalld zone the rules go in |
 | `elasticsearch_firewall_ports` | `[]` | Anything else this host serves: `["9600/tcp", "9200-9205/tcp"]` |
-| `elasticsearch_firewall_services` | `[]` | Named firewalld services |
+| `elasticsearch_firewall_services` | `[]` | Named firewalld services (firewalld only; list their ports for ufw) |
 
-If firewalld is not running the role says which ports still have to be reachable rather than failing,
-so hosts filtering traffic another way are not blocked by it.
+The role never starts or enables a firewall. If neither firewalld nor ufw is active it says which
+ports still have to be reachable rather than failing, so hosts filtering traffic another way are not
+blocked by it.
 
 ## Hardened hosts (FIPS, SELinux, fapolicyd)
 
@@ -529,8 +535,9 @@ under a targeted policy in enforcing mode. Two things still matter:
 - **Failed first bootstrap.** If a new cluster's first bootstrap fails partway, re-run with `-e elasticsearch_cluster_bootstrap=true`.
 - **Single-node clusters** use `discovery.type: single-node`. To grow one into a multi-node cluster, set `elasticsearch_discovery_type: multi-node` before adding nodes.
 - **Upgrades** are supported within 9.x. Downgrades and major-version upgrades are refused by preflight.
-- **RPM security auto-configuration.** The role removes the keystore entries and the `certs/` directory it creates, because they conflict with the PEM-based TLS config.
+- **Package security auto-configuration.** The RPM and Debian packages both configure security on first install. The role removes the keystore entries and the `certs/` directory it creates, because they conflict with the PEM-based TLS config.
 - **Check mode** is not supported for first-time installs, because later tasks need the Elasticsearch binaries to exist.
+- **Ubuntu package hold.** To upgrade Elasticsearch outside the role, `apt-mark unhold elasticsearch` first. The role itself installs the pinned version through the hold.
 - **Repository GPG key.** If importing Elastic's key fails under your system crypto policy, point `elasticsearch_repo_baseurl` and `elasticsearch_repo_gpgkey` at an internal mirror, or use a Satellite repository (`elasticsearch_repo_source: satellite`).
 - **Containers.** `vm.max_map_count` can't be set from inside a container. Set `elasticsearch_manage_sysctl: false` and configure it on the container host instead.
 - **Logstash user.** The example `group_vars` create a `logstash_writer` security role for Logstash's Elasticsearch output. The role doesn't create native users; create `logstash_internal` yourself.
@@ -561,7 +568,8 @@ and an ingest pipeline, and turns the GeoIP downloader off. The sequence is:
      changed role definition and a pipeline set to `absent` are applied in the same run.
    - It goes back to the converge settings, which triggers another rolling restart.
 3. **verify** ([`verify.yml`](molecule/default/verify.yml)):
-   - Every node runs the pinned version, and the Elastic repository is defined but disabled.
+   - Every node runs the pinned version, and the Elastic repository is defined but disabled (on
+     Ubuntu, the package is held).
    - File modes and owners are correct, the RPM's `certs/` directory is gone, and
      `cluster.initial_master_nodes` was removed.
    - The keystore no longer has `bootstrap.password` or the RPM's auto-configuration entries, and
@@ -623,13 +631,18 @@ KVM/libvirt (`qemu:///system`). Each VM has its own kernel, so SELinux is enforc
 as `vm.max_map_count` are the VM's own. Overrides for the VMs go in
 `molecule/kvm/inventory/group_vars/<group>/kvm.yml`.
 
+[`molecule/kvm-ubuntu2404/`](molecule/kvm-ubuntu2404/) and
+[`molecule/kvm-ubuntu2604/`](molecule/kvm-ubuntu2604/) run the same thing on Ubuntu 24.04 and 26.04
+VMs. They only swap the cloud image, and share `molecule/kvm/`'s playbooks and inventory.
+
 ```bash
-molecule test -s kvm
+for s in kvm kvm-ubuntu2404 kvm-ubuntu2604; do molecule test -s "$s" || break; done
 ```
 
 The machine running Molecule needs libvirt, `virt-install`, `qemu-img` and `xorriso`, and its user
-must be able to manage `qemu:///system`. The AlmaLinux 10 cloud image downloads once, checksum
-verified, to `/var/lib/libvirt/images/molecule`; each VM gets a throwaway disk on top of it.
+must be able to manage `qemu:///system`. Each cloud image downloads once, checksum verified, to
+`/var/lib/libvirt/images/molecule`; each VM gets a throwaway disk on top of it. VM names include the
+scenario, so the three scenarios can also run side by side if the machine has the memory.
 
 ## Role layout
 

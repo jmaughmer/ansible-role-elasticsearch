@@ -89,7 +89,7 @@
       changed_when: false
       failed_when: false
 
-    - name: Rolling restart | Upgrade Elasticsearch package
+    - name: Rolling restart | Upgrade Elasticsearch package (dnf)
       ansible.builtin.dnf:
         name: "elasticsearch-{{ hostvars[item]._es_target_version }}"
         state: present
@@ -97,13 +97,37 @@
         lock_timeout: "{{ elasticsearch_dnf_lock_timeout }}"
         enablerepo: "{{ _es_package_repos if _es_package_repos | length > 0 else omit }}"
       delegate_to: "{{ item }}"
-      loop: "{{ _es_batch_upgrades }}"
+      loop: "{{ _es_batch_upgrades | select('in', _es_dnf_hosts) | list }}"
       async: "{{ 0 if ansible_check_mode else elasticsearch_download_async_timeout }}"
       poll: "{{ elasticsearch_download_async_poll }}"
       register: _es_roll_upgrade
       until: _es_roll_upgrade is not failed
       retries: "{{ elasticsearch_task_retries }}"
       delay: "{{ elasticsearch_task_delay }}"
+
+    - name: Rolling restart | Upgrade Elasticsearch package (apt)
+      ansible.builtin.apt:
+        name: "elasticsearch={{ hostvars[item]._es_target_version }}"
+        state: present
+        allow_change_held_packages: true
+        allow_downgrade: false
+        cache_valid_time: 3600
+        lock_timeout: "{{ elasticsearch_dnf_lock_timeout }}"
+      delegate_to: "{{ item }}"
+      loop: "{{ _es_batch_upgrades | reject('in', _es_dnf_hosts) | list }}"
+      async: "{{ 0 if ansible_check_mode else elasticsearch_download_async_timeout }}"
+      poll: "{{ elasticsearch_download_async_poll }}"
+      register: _es_roll_upgrade_apt
+      until: _es_roll_upgrade_apt is not failed
+      retries: "{{ elasticsearch_task_retries }}"
+      delay: "{{ elasticsearch_task_delay }}"
+
+    - name: Rolling restart | Hold the upgraded Elasticsearch package
+      ansible.builtin.dpkg_selections:
+        name: elasticsearch
+        selection: hold
+      delegate_to: "{{ item }}"
+      loop: "{{ _es_batch_upgrades | reject('in', _es_dnf_hosts) | list }}"
 
     - name: Rolling restart | Reinstall plugins on upgraded nodes
       ansible.builtin.include_tasks: plugins_sync.yml

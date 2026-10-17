@@ -93,12 +93,46 @@
     - elasticsearch_manage_firewall | bool
     - (_es_firewalld_state.stdout | default('') | trim) == 'active'
 
-- name: System | Report that firewalld is not running
+# Ubuntu's firewall. Rules are only added while ufw is active, as with firewalld.
+- name: System | Check whether ufw is active
+  ansible.builtin.command:
+    cmd: ufw status
+  register: _es_ufw_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - elasticsearch_manage_firewall | bool
+    - (_es_firewalld_state.stdout | default('') | trim) != 'active'
+
+- name: System | Open Elasticsearch and additional ports in ufw
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.split('/') | first | replace('-', ':') }}"
+    proto: "{{ item.split('/') | last }}"
+    comment: elasticsearch
+  loop: "{{ [elasticsearch_http_port ~ '/tcp', elasticsearch_transport_port ~ '/tcp'] + elasticsearch_firewall_ports }}"
+  when:
+    - elasticsearch_manage_firewall | bool
+    - _es_ufw_active | bool
+
+- name: System | Report firewalld services that ufw cannot open
   ansible.builtin.debug:
     msg: >-
-      elasticsearch_manage_firewall is on but firewalld is not running on {{ inventory_hostname }},
+      elasticsearch_firewall_services ({{ elasticsearch_firewall_services | join(', ') }}) are firewalld
+      service names, which ufw does not know. List their ports in elasticsearch_firewall_ports instead.
+  when:
+    - elasticsearch_manage_firewall | bool
+    - _es_ufw_active | bool
+    - elasticsearch_firewall_services | length > 0
+
+- name: System | Report that no firewall is running
+  ansible.builtin.debug:
+    msg: >-
+      elasticsearch_manage_firewall is on but neither firewalld nor ufw is running on {{ inventory_hostname }},
       so no rules were added. Ports {{ elasticsearch_http_port }} and
       {{ elasticsearch_transport_port }} have to be reachable however this host filters traffic.
   when:
     - elasticsearch_manage_firewall | bool
     - (_es_firewalld_state.stdout | default('') | trim) != 'active'
+    - not (_es_ufw_active | bool)

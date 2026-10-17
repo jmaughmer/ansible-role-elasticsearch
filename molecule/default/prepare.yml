@@ -5,10 +5,22 @@
   hosts: all
   gather_facts: false
   tasks:
+    - name: Read the distribution
+      ansible.builtin.setup:
+        gather_subset: [min]
+
     - name: Install iproute and openssl
       ansible.builtin.dnf:
         name: [iproute, openssl]
         state: present
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Install iproute2 and openssl
+      ansible.builtin.apt:
+        name: [iproute2, openssl]
+        state: present
+        update_cache: true
+      when: ansible_facts['os_family'] == 'Debian'
 
 # vm.max_map_count is not namespaced: the containers see the host's value and
 # cannot change it. Elasticsearch's bootstrap checks refuse to start a node
