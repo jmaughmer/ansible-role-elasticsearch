@@ -72,7 +72,8 @@
     - name: Create the CA
       ansible.builtin.command:
         argv: [openssl, req, -x509, -newkey, "rsa:2048", -nodes, -days, "30",
-               -subj, /CN=Molecule test CA, -keyout, ca.key, -out, ca.crt]
+               -subj, /CN=Molecule test CA, -addext, "basicConstraints=critical,CA:TRUE",
+               -addext, "keyUsage=critical,keyCertSign,cRLSign", -keyout, ca.key, -out, ca.crt]
         chdir: "{{ tls_dir }}"
         creates: ca.crt
 
@@ -81,7 +82,10 @@
         dest: "{{ tls_dir }}/{{ item }}.ext"
         content: |
           basicConstraints = CA:FALSE
+          keyUsage = critical, digitalSignature, keyEncipherment
           extendedKeyUsage = serverAuth, clientAuth
+          subjectKeyIdentifier = hash
+          authorityKeyIdentifier = keyid
           subjectAltName = DNS:{{ item }}, DNS:localhost, IP:{{ hostvars[item].ansible_facts.default_ipv4.address }}, IP:127.0.0.1
         mode: "0600"
       loop: "{{ groups['elasticsearch'] }}"
