@@ -37,6 +37,15 @@
       register: test_repo
       changed_when: false
       failed_when: test_repo.stdout is not search('elasticsearch-9.x')
+      when: ansible_facts.packages.dpkg is not defined
+
+    # Held so a routine `apt upgrade` cannot upgrade Elasticsearch
+    - name: Check the package is held
+      ansible.builtin.command: dpkg-query -W -f='${Status}' elasticsearch
+      register: test_hold
+      changed_when: false
+      failed_when: test_hold.stdout is not match('hold ok installed')
+      when: ansible_facts.packages.dpkg is defined
 
     - name: Check file ownership and modes
       ansible.builtin.stat:
