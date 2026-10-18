@@ -2,14 +2,14 @@
 # fapolicyd only allows code it trusts, and its trust comes from the rpm
 # database. Plugins are unpacked by elasticsearch-plugin rather than installed
 # by rpm, so Elasticsearch cannot load them until they are trusted explicitly.
-- name: fapolicyd | Check whether fapolicyd is running
-  ansible.builtin.command:
-    cmd: systemctl is-active fapolicyd
-  register: _es_fapolicyd_state
-  changed_when: false
-  failed_when: false
-  check_mode: false
-  when: (elasticsearch_fapolicyd_trust | string | lower) == 'auto'
+# Nor are the shared libraries and helper executables the package ships, such
+# as the bundled JDK's: the default fapolicyd-filter.conf leaves usr/share/ out
+# of the rpm trust except for scripts, archives and bin/ directories, so
+# bin/elasticsearch cannot run its launcher as the elasticsearch user, and
+# Java and machine learning cannot load their libraries. And jansi's native
+# library ships inside a jar and would be unpacked to a new temporary file on
+# every start, which nothing can trust in advance, so it is unpacked once to a
+# fixed directory, trusted there, and the JVM options point jansi at it.
 
 # Published as a fact: a rolling upgrade reinstalls plugins on each node and
 # refreshes its entries from the host that runs the upgrade, which cannot see
@@ -17,7 +17,10 @@
 - name: fapolicyd | Record what this node trusts
   ansible.builtin.set_fact:
     _es_fapolicyd_trust: >-
-      {{ {'paths': _es_fapolicyd_paths, 'path': _es_fapolicyd_trust_file, 'name': elasticsearch_fapolicyd_trust_file}
+      {{ {'paths': _es_fapolicyd_paths, 'path': _es_fapolicyd_trust_file, 'name': elasticsearch_fapolicyd_trust_file,
+          'home': elasticsearch_home, 'patterns': _es_fapolicyd_rpm_patterns,
+          'state': _es_fapolicyd_state_file, 'spec': _es_fapolicyd_spec,
+          'native_dir': elasticsearch_fapolicyd_native_dir, 'native_libs': _es_native_libs}
          if _es_fapolicyd_manage | bool else {} }}
 
 - name: fapolicyd | Manage the trust database
@@ -35,7 +38,8 @@
         fail_msg: >-
           elasticsearch_fapolicyd_trust asks for trust entries, but /usr/sbin/fapolicyd-cli is not
           installed on {{ inventory_hostname }}. Install the fapolicyd package, or set
-          elasticsearch_fapolicyd_trust: false and trust {{ _es_fapolicyd_paths | join(', ') }} another way.
+          elasticsearch_fapolicyd_trust: false and trust the package's libraries
+          {{ ('and ' ~ (_es_fapolicyd_paths | join(', ')) ~ ' ') if _es_fapolicyd_paths | length > 0 else '' }}another way.
         quiet: true
 
     - name: fapolicyd | Check the trust file
@@ -43,16 +47,36 @@
         path: "{{ _es_fapolicyd_trust_file }}"
       register: _es_fapolicyd_file
 
+    - name: fapolicyd | Read what the entries were written for
+      ansible.builtin.slurp:
+        src: "{{ _es_fapolicyd_state_file }}"
+      register: _es_fapolicyd_state_read
+      failed_when: false
+      when: _es_fapolicyd_file.stat.exists
+
+    # What the entries cover changes with the package and with the plugins,
+    # whose descriptors record their versions. A fingerprint that differs from
+    # the recorded one means a change after the entries were written: by
+    # hand, or in a run that stopped before it refreshed them.
+    - name: fapolicyd | Read the package and plugin fingerprint
+      ansible.builtin.command:
+        argv: "{{ _es_fapolicyd_fingerprint_argv }}"
+      register: _es_fapolicyd_fingerprint
+      changed_when: false
+      check_mode: false
+
     # The entries hold a size and a checksum per file, so they are rewritten
     # whenever the files they cover have changed.
     - name: fapolicyd | Refresh the trust entries
       ansible.builtin.include_tasks:
         file: fapolicyd_refresh.yml
         apply:
-          tags: [elasticsearch, elasticsearch_plugins]
+          tags: [elasticsearch, elasticsearch_install, elasticsearch_plugins]
       vars:
         _es_fapolicyd_host: "{{ inventory_hostname }}"
       when: >-
         (not _es_fapolicyd_file.stat.exists)
         or (_es_plugins_changed | default(false) | bool)
+        or (_es_fapolicyd_state_read.content | default('e30=') | b64decode | from_json)
+           != {'spec': _es_fapolicyd_spec, 'fingerprint': _es_fapolicyd_fingerprint.stdout}
         or (elasticsearch_fapolicyd_force_trust | bool)

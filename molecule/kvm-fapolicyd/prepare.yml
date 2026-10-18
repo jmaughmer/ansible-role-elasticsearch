@@ -1,0 +1,48 @@
+---
+- name: Prepare as in the kvm scenario
+  ansible.builtin.import_playbook: ../kvm/prepare.yml
+
+# fapolicyd with its default rules. allow_filesystem_mark = 1, because the
+# package's unit sets PrivateTmp, and fapolicyd's default mount marks do not
+# cover the service's own mount namespace (see the README). The daemon runs
+# in the foreground with --debug-deny, so the journal names every file it
+# denies, which audit records do not; verify.yml reads it.
+- name: Run fapolicyd
+  hosts: all
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Install fapolicyd
+      ansible.builtin.dnf:
+        name: fapolicyd
+        state: present
+
+    - name: Watch whole filesystems
+      ansible.builtin.lineinfile:
+        path: /etc/fapolicyd/fapolicyd.conf
+        regexp: '^\s*allow_filesystem_mark\s*='
+        line: allow_filesystem_mark = 1
+
+    - name: Create the drop-in directory
+      ansible.builtin.file:
+        path: /etc/systemd/system/fapolicyd.service.d
+        state: directory
+        mode: "0755"
+
+    - name: Log every denial with its path
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/fapolicyd.service.d/molecule.conf
+        mode: "0644"
+        content: |
+          [Service]
+          Type=simple
+          PIDFile=
+          ExecStart=
+          ExecStart=/usr/sbin/fapolicyd --debug-deny
+
+    - name: Start fapolicyd
+      ansible.builtin.systemd_service:
+        name: fapolicyd
+        state: started
+        enabled: true
+        daemon_reload: true

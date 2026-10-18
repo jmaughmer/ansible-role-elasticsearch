@@ -23,7 +23,7 @@ What it does:
   ansible-galaxy collection install -r requirements.yml
   ```
 
-- **Target hosts:** RHEL, AlmaLinux or Rocky Linux 9 or 10, or Ubuntu 24.04 or 26.04 (see [Supported platforms](#supported-platforms)), with `openssl` installed. On STIG-hardened hosts see [Hardened hosts](#hardened-hosts-fips-selinux-fapolicyd) — fapolicyd has to allow Ansible before anything runs. They need a package source: Elastic's repository (`artifacts.elastic.co`) or a mirror, or (Enterprise Linux only) a Red Hat Satellite or Katello server. See [Package source](#package-source).
+- **Target hosts:** RHEL, AlmaLinux or Rocky Linux 9 or 10, or Ubuntu 24.04 or 26.04 (see [Supported platforms](#supported-platforms)), with `openssl` installed. On STIG-hardened hosts see [Hardened hosts](#hardened-hosts-fips-selinux-fapolicyd). They need a package source: Elastic's repository (`artifacts.elastic.co`) or a mirror, or (Enterprise Linux only) a Red Hat Satellite or Katello server. See [Package source](#package-source).
 - **Name resolution** between nodes: inventory hostnames are used for discovery and API calls unless you override them.
 - **Certificates.** Each node certificate must:
   - include the node's inventory hostname (or `elasticsearch_api_host`) in its SAN, because `verification_mode: full` is the default;
@@ -463,33 +463,59 @@ The role is meant to run on hosts with the DISA STIG applied. What that takes:
 
 ### fapolicyd
 
-**Ansible itself has to be allowed first.** fapolicyd blocks whatever it does not trust, and that
-includes the Python module Ansible copies to the host for *every* task. Nothing runs until that is
-allowed, so add a rule once, before using these roles:
+**Ansible needs no rule of its own.** Ansible runs every task through a Python file it copies to the
+host, and fapolicyd denies Python files it does not trust. But its default rules include
+`allow perm=any uid=0 trust=1 : all`, which lets root's trusted programs open anything, and these
+roles run as root (`become`), so Ansible and the `repo_lookup.py` helper used in Satellite mode work
+unchanged; this was tested with fapolicyd enforcing on AlmaLinux 10. Only modules run as an
+unprivileged user are denied (`AnsiballZ_*.py`), unless SSH pipelining is on, which hands them to
+Python on its standard input. Where that rule has been removed, allow Ansible's Python to open files
+in its temporary directory (`~/.ansible/tmp` of the user Ansible connects as). Denials are audited,
+so `ausearch -m fanotify -ts recent` shows what was blocked.
 
-```
-# /etc/fapolicyd/rules.d/30-ansible.rules
-allow perm=open exe=/usr/bin/python3.9 : dir=/root/.ansible/tmp/
-```
+**fapolicyd only sees Elasticsearch when it watches whole filesystems.** The package's unit sets
+`PrivateTmp=yes`, which runs Elasticsearch in a mount namespace of its own. With its default
+`allow_filesystem_mark = 0`, fapolicyd watches individual mounts, and the copies in that namespace
+are not among them, so it neither checks nor denies anything Elasticsearch opens or runs. With
+`allow_filesystem_mark = 1` in `/etc/fapolicyd/fapolicyd.conf` it does, and Elasticsearch then needs
+the entries below to start at all. The role writes them either way, so changing that setting later
+breaks nothing.
 
-Load it with `fagenrules --load`. The file has to sort before the rules that deny untrusted
-interpreted files, and the interpreter and directory have to match the host's Python and the user you
-become (`ansible_remote_tmp`). The same rule covers the `repo_lookup.py` helper these roles run in
-Satellite mode. Denials are audited, so `ausearch -m fanotify -ts recent` shows what was blocked.
+**What rpm installed but fapolicyd does not trust.** The default
+`/etc/fapolicyd/fapolicyd-filter.conf` leaves `usr/share/` out of the rpm trust apart from scripts,
+archives and `bin/` directories. Root is not affected, which is why `elasticsearch-plugin` and
+`elasticsearch-keystore` still work, but as the `elasticsearch` user `bin/elasticsearch` cannot run
+its launcher (`server-launcher: Operation not permitted`), and Java and machine learning cannot load
+their shared libraries. The role trusts every `*.so` file, `jspawnhelper`, `jexec` and
+`server-launcher` under `elasticsearch_home` that the paths below do not already cover, about 80
+files in 9.5.
+
+**A library unpacked on every start.** The console library jansi ships its native part inside a jar
+(`lib/tools/ansi-console/jansi-*.jar`), and Elasticsearch unpacks it to a new file under its
+temporary directory on every start, which nothing can trust in advance. Elasticsearch still starts
+without it, but fapolicyd logs a denial each time. The role unpacks it once to
+`elasticsearch_fapolicyd_native_dir` (`/usr/local/lib/ansible-elasticsearch`), trusts it there, and
+adds `-Dlibrary.jansi.path` to `jvm.options.d/ansible.options` so Java loads that copy.
 
 **Plugins.** `elasticsearch-plugin` unpacks jars that rpm never installed, so fapolicyd stops
-Elasticsearch loading them. The role adds them to the trust database itself:
+Elasticsearch loading them. The role trusts the plugin directory too:
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `elasticsearch_fapolicyd_trust` | `auto` | `auto` acts only when fapolicyd is running; `true` always; `false` never |
-| `elasticsearch_fapolicyd_trust_paths` | plugin directory | Paths to trust; directories are added recursively |
+| `elasticsearch_fapolicyd_trust_paths` | plugin directory, when plugins are managed | Paths to trust, besides the package's libraries; directories are added recursively |
 | `elasticsearch_fapolicyd_trust_file` | `ansible-elasticsearch` | File under `/etc/fapolicyd/trust.d/` |
+| `elasticsearch_fapolicyd_native_dir` | `/usr/local/lib/ansible-elasticsearch` | Where native libraries from jars are unpacked and trusted |
 
-Entries are rewritten when a plugin changes and loaded with `fapolicyd-cli --update`. That
-includes a rolling upgrade: plugin files carry the Elasticsearch version in their names, so each
-node's entries are rewritten after its plugins are reinstalled and before it starts again. With
-`elasticsearch_plugins: []` there is nothing to trust and the role leaves fapolicyd alone.
+fapolicyd trusts files by path, size and checksum, so the role rewrites the entries, and loads them
+with `fapolicyd-cli --update`, whenever the files they cover change. That includes a rolling upgrade:
+plugin files carry the Elasticsearch version in their names, so each node's entries are rewritten
+after the new package is installed and its plugins are reinstalled, and before it starts again. A
+change made by hand with `elasticsearch-plugin` or the package manager, or a run that stopped before
+the entries were rewritten, is caught too: next to the trust file, in
+`/etc/fapolicyd/ansible-elasticsearch.ansible.json`, the role records what the entries were written
+for (the installed package, the plugins' descriptors and the paths it trusts), and rewrites them on
+the next run when any of these differs. Writing the entries takes a few seconds.
 
 The entries go in a file of their own under `/etc/fapolicyd/trust.d/`, which needs fapolicyd 1.1 or
 newer (RHEL 9 and 10 both ship that). Set `elasticsearch_fapolicyd_trust: false` on anything older and manage
@@ -516,7 +542,8 @@ installs neither, and preflight says so when the setting is on.
 - The role's own idempotency hashes are SHA-256.
 - **Private keys must not be in the traditional encrypted PEM format.** A key that starts with
   `Proc-Type: 4,ENCRYPTED` derives its key with MD5 and cannot be read at all in FIPS mode. Preflight
-  fails with that message when the host reports FIPS. Convert it once:
+  fails with that message when the host reports FIPS. Convert it once, on a machine without FIPS mode
+  (the FIPS host cannot read it either):
 
   ```bash
   openssl pkcs8 -topk8 -in old.key -out new.key
@@ -666,8 +693,13 @@ as `vm.max_map_count` are the VM's own. Overrides for the VMs go in
 [`molecule/kvm-ubuntu2604/`](molecule/kvm-ubuntu2604/) run the same thing on Ubuntu 24.04 and 26.04
 VMs. They only swap the cloud image, and share `molecule/kvm/`'s playbooks and inventory.
 
+[`molecule/kvm-fapolicyd/`](molecule/kvm-fapolicyd/) runs the upgrade scenario on three AlmaLinux 10
+VMs with fapolicyd enforcing and `allow_filesystem_mark = 1`, and nothing added to its rules. It
+checks that the cluster installs, upgrades in a rolling restart and runs with nothing denied, and that
+the trust entries cover the upgraded package and plugin.
+
 ```bash
-for s in kvm kvm-ubuntu2404 kvm-ubuntu2604; do molecule test -s "$s" || break; done
+for s in kvm kvm-ubuntu2404 kvm-ubuntu2604 kvm-fapolicyd; do molecule test -s "$s" || break; done
 ```
 
 The machine running Molecule needs libvirt, `virt-install`, `qemu-img` and `xorriso`, and its user

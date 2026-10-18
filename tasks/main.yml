@@ -53,10 +53,8 @@
 
 - name: Manage fapolicyd trust
   ansible.builtin.import_tasks: fapolicyd.yml
-  when:
-    - (elasticsearch_fapolicyd_trust | string | lower) != 'false'
-    - _es_fapolicyd_paths | length > 0
-  tags: [elasticsearch, elasticsearch_plugins]
+  when: (elasticsearch_fapolicyd_trust | string | lower) != 'false'
+  tags: [elasticsearch, elasticsearch_install, elasticsearch_plugins]
 
 # Phase 2 - start stopped/new nodes in parallel, then rolling restart of running
 # nodes that need it, orchestrated from a single host.
