@@ -114,6 +114,11 @@ elasticsearch_home: /usr/share/elasticsearch
 elasticsearch_conf_dir: /etc/elasticsearch
 elasticsearch_data_path: /var/lib/elasticsearch
 elasticsearch_log_path: /var/log/elasticsearch
+# Elasticsearch's temporary directory (ES_TMPDIR), created by the role and
+# owned by elasticsearch. Native libraries unpacked from jars are loaded from
+# it, so it must not be mounted noexec, as /tmp is on STIG-hardened hosts.
+# Empty leaves the package default, a new directory under /tmp on every start.
+elasticsearch_tmp_dir: "{{ elasticsearch_data_path }}/tmp"
 elasticsearch_path_repo: []
 
 elasticsearch_network_host: ["_local_", "_site_"]

@@ -35,16 +35,16 @@
     _es_restart_required: true
   when: _es_systemd_override is changed
 
-- name: System | Ensure data and log directories
+- name: System | Ensure data, log and temporary directories
   ansible.builtin.file:
     path: "{{ item }}"
     state: directory
     owner: elasticsearch
     group: elasticsearch
     mode: "2750"
-  loop:
-    - "{{ elasticsearch_data_path }}"
-    - "{{ elasticsearch_log_path }}"
+  loop: >-
+    {{ [elasticsearch_data_path, elasticsearch_log_path]
+       + ([elasticsearch_tmp_dir] if (elasticsearch_tmp_dir | length) > 0 else []) }}
 
 - name: System | Check whether firewalld is running
   ansible.builtin.command:
