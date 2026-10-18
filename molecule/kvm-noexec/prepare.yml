@@ -1,0 +1,54 @@
+---
+- name: Prepare as in the kvm scenario
+  ansible.builtin.import_playbook: ../kvm/prepare.yml
+
+# As the DISA STIG has them: tmpfs for /tmp and /var/tmp (the STIG asks for
+# separate filesystems, which is what matters here), and /home bound onto
+# itself so it keeps its contents, among them the test user's SSH key.
+- name: Mount the temporary filesystems and /home noexec
+  hosts: all
+  become: true
+  gather_facts: false
+  vars:
+    test_noexec_mounts:
+      - {path: /tmp, src: tmpfs, fstype: tmpfs, opts: "nodev,nosuid,noexec,mode=1777"}
+      - {path: /var/tmp, src: tmpfs, fstype: tmpfs, opts: "nodev,nosuid,noexec,mode=1777"}
+      - {path: /dev/shm, src: tmpfs, fstype: tmpfs, opts: "nodev,nosuid,noexec"}
+      - {path: /home, src: /home, fstype: none, opts: "bind,nodev,nosuid,noexec"}
+  tasks:
+    - name: Mount noexec
+      ansible.posix.mount:
+        path: "{{ item.path }}"
+        src: "{{ item.src }}"
+        fstype: "{{ item.fstype }}"
+        opts: "{{ item.opts }}"
+        state: mounted
+      loop: "{{ test_noexec_mounts }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    # A new tmpfs comes up as tmpfs_t; label it as the directory it covers
+    - name: Restore the SELinux labels
+      ansible.builtin.command:
+        argv: [restorecon, /tmp, /var/tmp]
+      changed_when: false
+      failed_when: false
+
+    - name: Read the mount options
+      ansible.builtin.command:
+        argv: [findmnt, --noheadings, --output, OPTIONS, --target, "{{ item.path }}"]
+      loop: "{{ test_noexec_mounts }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: test_mount_options
+      changed_when: false
+
+    - name: Check every one is noexec
+      ansible.builtin.assert:
+        that:
+          - "'noexec' in item.stdout.split(',')"
+        fail_msg: "{{ item.item.path }} is mounted {{ item.stdout }}"
+        quiet: true
+      loop: "{{ test_mount_options.results }}"
+      loop_control:
+        label: "{{ item.item.path }}"
