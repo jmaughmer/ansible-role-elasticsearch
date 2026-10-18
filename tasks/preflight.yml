@@ -4,13 +4,15 @@
     that:
       - elasticsearch_supported_distributions is sequence
       - elasticsearch_supported_distributions is not string
-      - ansible_facts['os_family'] == 'RedHat'
       - ansible_facts['distribution'] in elasticsearch_supported_distributions
-      - ansible_facts['distribution_major_version'] in ['9', '10']
+      - >-
+        (ansible_facts['os_family'] == 'RedHat' and ansible_facts['distribution_major_version'] in ['9', '10'])
+        or (ansible_facts['distribution'] == 'Ubuntu' and ansible_facts['distribution_version'] in ['24.04', '26.04'])
     fail_msg: >-
       Unsupported platform {{ ansible_facts['distribution'] }}
-      {{ ansible_facts['distribution_version'] }}. Supported: major version 9 or 10 of
-      {{ elasticsearch_supported_distributions | join(', ') }} (elasticsearch_supported_distributions).
+      {{ ansible_facts['distribution_version'] }}. Supported: Enterprise Linux 9 or 10 and Ubuntu
+      24.04 or 26.04, from {{ elasticsearch_supported_distributions | join(', ') }}
+      (elasticsearch_supported_distributions).
     quiet: true
 
 - name: Preflight | Verify the play is not serialized
@@ -51,9 +53,11 @@
       - elasticsearch_satellite_repo_state in ['unmanaged', 'enabled', 'disabled']
       - elasticsearch_satellite_repo_overrides is mapping
       - elasticsearch_satellite_repo_overrides.keys() | map('lower') | intersect(['enabled', 'baseurl', 'name']) | length == 0
+      - elasticsearch_repo_source != 'satellite' or ansible_facts['os_family'] == 'RedHat'
     fail_msg: >-
       elasticsearch_repo_source must be elastic, satellite or none (elasticsearch_manage_repo was replaced:
-      use elasticsearch_repo_source: none instead of false). Satellite needs elasticsearch_satellite_repo_id;
+      use elasticsearch_repo_source: none instead of false). Satellite is for Enterprise Linux hosts only
+      and needs elasticsearch_satellite_repo_id;
       elasticsearch_satellite_repo_state must be unmanaged, enabled or disabled; and
       elasticsearch_satellite_repo_overrides cannot set enabled (use the state setting), baseurl or name.
     quiet: true
@@ -64,6 +68,16 @@
       - elasticsearch_elastic_password is defined
       - elasticsearch_elastic_password | length >= 6
     fail_msg: elasticsearch_elastic_password must be defined (vaulted) and at least 6 characters.
+    quiet: true
+  no_log: "{{ elasticsearch_no_log }}"
+
+# elasticsearch-keystore reads the password as one line of standard input.
+- name: Preflight | Verify keystore password
+  ansible.builtin.assert:
+    that:
+      - "(elasticsearch_keystore_password | string) is not search('[\\r\\n]')"
+      - "(elasticsearch_keystore_previous_password | string) is not search('[\\r\\n]')"
+    fail_msg: elasticsearch_keystore_password and elasticsearch_keystore_previous_password must not contain line breaks.
     quiet: true
   no_log: "{{ elasticsearch_no_log }}"
 

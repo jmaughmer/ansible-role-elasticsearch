@@ -72,6 +72,10 @@
       - "{{ elasticsearch_home }}/bin/elasticsearch-keystore"
       - remove
       - bootstrap.password
+    stdin: "{{ _es_keystore_cli_password if (_es_keystore_cli_password | string | length) > 0 else omit }}"
+  vars:
+    # keystore.yml sets it, unless a run limited by tags skipped it
+    _es_keystore_cli_password: "{{ elasticsearch_keystore_password }}"
   changed_when: true
   when: not (_es_has_data | bool)
 

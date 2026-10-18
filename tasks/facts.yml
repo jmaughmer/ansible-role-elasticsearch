@@ -8,10 +8,14 @@
   delay: "{{ elasticsearch_task_delay }}"
   when: ansible_facts['os_family'] is not defined
 
+# dpkg-query prints the selection and state too: '<want> ok installed <version>'
+# for an installed package, 'deinstall ok config-files <version>' once removed.
 - name: Facts | Query installed Elasticsearch package version
   ansible.builtin.command:
-    cmd: rpm -q --queryformat '%{VERSION}' elasticsearch
-  register: _es_rpm_query
+    cmd: >-
+      {{ "dpkg-query -W -f='${Status} ${Version}' elasticsearch" if ansible_facts['os_family'] == 'Debian'
+         else "rpm -q --queryformat '%{VERSION}' elasticsearch" }}
+  register: _es_pkg_query
   changed_when: false
   failed_when: false
   check_mode: false
@@ -31,7 +35,12 @@
 
 - name: Facts | Set node facts
   ansible.builtin.set_fact:
-    _es_installed_version: "{{ (_es_rpm_query.stdout | trim) if _es_rpm_query.rc == 0 else '' }}"
+    _es_pkg_mgr: "{{ 'apt' if ansible_facts['os_family'] == 'Debian' else 'dnf' }}"
+    _es_installed_version: >-
+      {{ '' if _es_pkg_query.rc != 0
+         else (_es_pkg_query.stdout | trim) if ansible_facts['os_family'] != 'Debian'
+         else (_es_pkg_query.stdout.split() | last) if ' ok installed ' in _es_pkg_query.stdout
+         else '' }}
     _es_is_running: "{{ (_es_service_state.stdout | trim) == 'active' }}"
     _es_has_data: "{{ _es_state_dir.stat.exists }}"
     _es_node_name: "{{ elasticsearch_node_name | default(inventory_hostname) }}"

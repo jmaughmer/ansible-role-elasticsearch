@@ -3,6 +3,12 @@
 elasticsearch_node_name: es-node-3
 elasticsearch_node_roles: [master, data]
 
+# A password-protected keystore. side_effect.yml changes the password to
+# test_keystore_password_changed and back.
+test_keystore_password: molecule-keystore-password
+test_keystore_password_changed: molecule-keystore-password-2
+elasticsearch_keystore_password: "{{ test_keystore_password }}"
+
 # An encrypted key: the role puts the passphrase in the keystore
 ssl_certificates:
   - name: es-3

@@ -9,8 +9,17 @@ _es_package_repos: >-
   {{ [_es_repo_name] if elasticsearch_repo_source == 'elastic'
      else ([elasticsearch_satellite_repo_id] if elasticsearch_repo_source == 'satellite' else []) }}
 _es_python: "{{ ansible_facts['python']['executable'] | default('/usr/bin/python3') }}"
+# apt source on Ubuntu. The kibana, logstash and elastic_fleet roles write the same
+# key and source, so a host running several of them ends up with one definition
+# (apt refuses two definitions of one URI with different keys).
+_es_apt_keyring: /etc/apt/keyrings/elastic.asc
+_es_apt_source: "/etc/apt/sources.list.d/elastic-{{ _es_major_version }}.x.sources"
+_es_ufw_active: "{{ (_es_ufw_state.stdout | default('')) is search('^Status: active', multiline=True) }}"
 _es_tls_dir: "{{ elasticsearch_conf_dir }}/tls"
 _es_keystore_path: "{{ elasticsearch_conf_dir }}/elasticsearch.keystore"
+# The packaged service feeds this file to Elasticsearch through
+# ES_KEYSTORE_PASSPHRASE_FILE.
+_es_keystore_passphrase_file: "{{ elasticsearch_conf_dir }}/elasticsearch.keystore.passphrase"
 _es_geoip_dir: "{{ elasticsearch_conf_dir }}/ingest-geoip"
 
 # ---------------------------------------------------------------------------
