@@ -258,6 +258,33 @@ Set `elasticsearch_node_roles` and `elasticsearch_node_name` in inventory (`host
 | `elasticsearch_cluster_health_status` | Health required between batches: `green`, or `yellow` for single-node clusters. |
 | `elasticsearch_restart_on_change` | Set to `false` to only report pending restarts. |
 | `elasticsearch_force_restart` | Rolling-restart every running node in the play. |
+| `elasticsearch_keystore_password` | Vault it. Protects the Elasticsearch keystore; see [Keystore password](#keystore-password). Empty leaves it unprotected. |
+
+### Keystore password
+
+The keystore holds `bootstrap.password`, the Active Directory bind password, the TLS key passphrase
+and any `elasticsearch_keystore_entries`. Without a password the keystore is only obfuscated, so
+anyone with a copy of the file, such as a backup, can read those values. To protect it:
+
+```yaml
+elasticsearch_keystore_password: "{{ vault_elasticsearch_keystore_password }}"
+```
+
+- The role sets the password on a new or existing keystore with `elasticsearch-keystore passwd`, and
+  passes it to every `elasticsearch-keystore` command it runs.
+- Elasticsearch needs the password every time it starts. The role writes it to
+  `/etc/elasticsearch/elasticsearch.keystore.passphrase` (`root:elasticsearch 0640`) and points the
+  service at it with `ES_KEYSTORE_PASSPHRASE_FILE` in the systemd drop-in. A node already running
+  restarts once, in the usual rolling restart, when the password is first set.
+- **Changing or removing the password:** set `elasticsearch_keystore_previous_password` to the current
+  password and `elasticsearch_keystore_password` to the new one (empty to remove it). The role tries
+  both, so leaving the previous password set afterwards does no harm. A running node keeps running
+  and reads the new passphrase file the next time it starts.
+- The passphrase file has the same readers as the keystore itself (root and the `elasticsearch`
+  group), so the password protects copies of the keystore, not the keystore on a running host.
+- If neither password opens a protected keystore, the run stops before changing anything in it.
+- The password can't contain line breaks, because `elasticsearch-keystore` reads it as one line.
+- Elasticsearch's FIPS mode requires a keystore password of at least 14 bytes.
 
 ### Active Directory, roles and role mappings
 
@@ -551,7 +578,7 @@ container network. Every node is master-eligible, and each gets its certificate 
 |---|---|---|
 | `es-1` | default | certificate and key as content |
 | `es-2` | default | certificate, key and CA as paths of files already on the host |
-| `es-3` | `master`, `data` (no ingest), `node.name: es-node-3` | key encrypted with a passphrase, which goes into the keystore |
+| `es-3` | `master`, `data` (no ingest), `node.name: es-node-3` | key encrypted with a passphrase, which goes into a password-protected keystore |
 
 [`prepare.yml`](molecule/default/prepare.yml) creates a test CA and a certificate per node for the
 name and address each container got. openssl runs in the first container, so the machine running
@@ -565,8 +592,10 @@ and an ingest pipeline, and turns the GeoIP downloader off. The sequence is:
      and no node restarts.
    - It changes a node attribute. That triggers a rolling restart, one node at a time in inventory
      order, after which every node runs the new attribute and the JVM option held back before. A
-     changed role definition and a pipeline set to `absent` are applied in the same run.
-   - It goes back to the converge settings, which triggers another rolling restart.
+     changed role definition and a pipeline set to `absent` are applied in the same run, and `es-3`'s
+     keystore password is changed, so `es-3` restarts with the new passphrase file.
+   - It goes back to the converge settings, which triggers another rolling restart and changes the
+     keystore password back.
 3. **verify** ([`verify.yml`](molecule/default/verify.yml)):
    - Every node runs the pinned version, and the Elastic repository is defined but disabled (on
      Ubuntu, the package is held).
@@ -574,6 +603,8 @@ and an ingest pipeline, and turns the GeoIP downloader off. The sequence is:
      `cluster.initial_master_nodes` was removed.
    - The keystore no longer has `bootstrap.password` or the RPM's auto-configuration entries, and
      holds the key passphrase only on `es-3`.
+   - Only `es-3`'s keystore has a password, and only `es-3` has the passphrase file and
+     `ES_KEYSTORE_PASSPHRASE_FILE` in its drop-in.
    - The cluster is green with three nodes, and node names, roles, version and plugins are as
      configured.
    - Anonymous requests are refused.
@@ -661,7 +692,7 @@ scenario, so the three scenarios can also run side by side if the machine has th
 │   ├── system.yml             # sysctl, systemd drop-in, firewalld
 │   ├── certificates.yml       # PEM files + key/cert/CA verification
 │   ├── configure.yml          # elasticsearch.yml, jvm.options.d
-│   ├── keystore.yml           # bootstrap.password, AD bind pw, key passphrase
+│   ├── keystore.yml           # keystore password, bootstrap.password, AD bind pw, key passphrase
 │   ├── plugins.yml / plugins_sync.yml
 │   ├── geoip.yml              # .mmdb database files in ingest-geoip
 │   ├── service.yml            # start new/stopped nodes, decide who needs restart

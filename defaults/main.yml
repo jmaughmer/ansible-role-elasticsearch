@@ -182,6 +182,14 @@ elasticsearch_api_timeout: 60
 # Additional secure settings: { "setting.name": "value" } (vault the values)
 elasticsearch_keystore_entries: {}
 
+# Password that protects the Elasticsearch keystore (vault this). Empty leaves
+# the keystore unprotected. The role writes it to a root:elasticsearch 0640 file
+# that the service reads at start-up.
+elasticsearch_keystore_password: ""
+# The keystore's current password, when changing or removing it. The role tries
+# both, so it can stay set after the change.
+elasticsearch_keystore_previous_password: ""
+
 elasticsearch_no_log: true
 
 # =============================================================================

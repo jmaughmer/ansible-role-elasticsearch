@@ -4,6 +4,9 @@
 LimitMEMLOCK=infinity
 {% endif %}
 TimeoutStartSec={{ elasticsearch_systemd_timeout_start_sec }}
+{% if (elasticsearch_keystore_password | string | length) > 0 %}
+Environment="ES_KEYSTORE_PASSPHRASE_FILE={{ _es_keystore_passphrase_file }}"
+{% endif %}
 {% for name, value in elasticsearch_systemd_environment | dictsort %}
 Environment="{{ name }}={{ value }}"
 {% endfor %}
