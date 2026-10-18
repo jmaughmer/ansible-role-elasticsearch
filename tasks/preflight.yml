@@ -166,7 +166,8 @@
     fail_msg: >-
       The private key for '{{ elasticsearch_ssl_certificate_name }}' is in the traditional encrypted
       PEM format (Proc-Type: 4,ENCRYPTED), whose key derivation uses MD5, and this host runs in FIPS
-      mode. Convert it first: openssl pkcs8 -topk8 -in old.key -out new.key
+      mode. Convert it on a machine without FIPS mode, which can still read it:
+      openssl pkcs8 -topk8 -in old.key -out new.key
     quiet: true
   when: ansible_facts['fips'] | default(false) | bool
   no_log: "{{ elasticsearch_no_log }}"

@@ -351,17 +351,23 @@ elasticsearch_selinux_log_type: var_log_t
 # Extra or overriding contexts: { "/srv/elasticsearch": "var_lib_t" }
 elasticsearch_selinux_fcontexts: {}
 
-# fapolicyd: trust what Elasticsearch loads but rpm did not install, which means
-# plugins. Without this the service cannot load them on a host running fapolicyd.
+# fapolicyd: trust what Elasticsearch loads but rpm did not install, which
+# means plugins, and the package's shared libraries and helper executables,
+# which the default fapolicyd filter leaves out of the rpm trust.
 #   auto  - manage the trust entries when fapolicyd is running
 #   true / false
 elasticsearch_fapolicyd_trust: auto
-# Empty trusts the plugin directory. Directories are added recursively.
+# Empty trusts the plugin directory when plugins are managed. Directories are
+# added recursively. The package's libraries are trusted either way.
 elasticsearch_fapolicyd_trust_paths: []
 # File under /etc/fapolicyd/trust.d/ the entries are written to
 elasticsearch_fapolicyd_trust_file: ansible-elasticsearch
-# Rewrite the entries even when no plugin changed
+# Rewrite the entries even when nothing changed
 elasticsearch_fapolicyd_force_trust: false
+# Where native libraries shipped inside jars (jansi's) are unpacked to and
+# trusted. jvm.options.d/ansible.options gets -Dlibrary.jansi.path pointing
+# here. Only this role's files belong in it.
+elasticsearch_fapolicyd_native_dir: /usr/local/lib/ansible-elasticsearch
 
 # =============================================================================
 # Network resilience (high-latency / low-bandwidth links)

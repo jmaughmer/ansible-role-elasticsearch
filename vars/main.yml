@@ -148,6 +148,41 @@ _es_fapolicyd_paths: >-
   {{ elasticsearch_fapolicyd_trust_paths if (elasticsearch_fapolicyd_trust_paths | length) > 0
      else ([elasticsearch_home ~ '/plugins'] if (elasticsearch_plugins | length) > 0 else []) }}
 _es_fapolicyd_trust_file: "/etc/fapolicyd/trust.d/{{ elasticsearch_fapolicyd_trust_file }}"
+# What the entries were written for, so a role change that trusts more gets
+# them rewritten. fapolicyd reads nothing else in /etc/fapolicyd.
+_es_fapolicyd_state_file: "/etc/fapolicyd/{{ elasticsearch_fapolicyd_trust_file }}.ansible.json"
+# Files under elasticsearch_home that the package installed but the default
+# fapolicyd-filter.conf leaves out of the rpm trust: shared libraries (the
+# bundled JDK's, Elasticsearch's own in lib/platform and machine learning's),
+# the JDK's helper executables in jdk/lib (jspawnhelper starts child
+# processes), and the launcher bin/elasticsearch runs.
+_es_fapolicyd_rpm_patterns: ["*.so", "*.so.*", jspawnhelper, jexec, server-launcher]
+# The installed package and the plugins' descriptors, see fapolicyd.yml
+_es_fapolicyd_fingerprint_argv:
+  - /bin/bash
+  - -c
+  - >-
+    set -o pipefail; shopt -s nullglob;
+    { rpm -q elasticsearch 2>/dev/null || dpkg-query -W elasticsearch;
+    cat /dev/null "$1"/plugins/*/plugin-descriptor.properties; } | sha256sum | cut -d ' ' -f 1
+  - fapolicyd-fingerprint
+  - "{{ elasticsearch_home }}"
+_es_fapolicyd_spec: >-
+  {{ {'home': elasticsearch_home, 'paths': _es_fapolicyd_paths, 'patterns': _es_fapolicyd_rpm_patterns,
+      'native_dir': elasticsearch_fapolicyd_native_dir, 'native_libs': _es_native_libs} }}
+_es_arch: "{{ ansible_facts['architecture'] | default('x86_64') | replace('arm64', 'aarch64') }}"
+# Native libraries the package ships inside jars, which would otherwise be
+# unpacked to a random temporary file on every start (see fapolicyd.yml).
+# jar is a glob under elasticsearch_home, entry a regular expression.
+#   jansi - the console library; found through library.jansi.path
+_es_native_libs:
+  - jar: lib/**/jansi-*.jar
+    entry: "org/fusesource/jansi/internal/native/Linux/{{ 'arm64' if _es_arch == 'aarch64' else _es_arch }}/libjansi[.]so"
+    required: false
+_es_jvm_options: >-
+  {{ elasticsearch_jvm_options
+     + (['-Dlibrary.jansi.path=' ~ elasticsearch_fapolicyd_native_dir]
+        if (elasticsearch_fapolicyd_trust | string | lower) != 'false' and _es_fapolicyd_manage | bool else []) }}
 _es_fapolicyd_manage: >-
   {{ (elasticsearch_fapolicyd_trust | string | lower) in ['true', 'yes']
      or ((elasticsearch_fapolicyd_trust | string | lower) == 'auto'
