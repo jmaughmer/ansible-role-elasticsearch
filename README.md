@@ -582,6 +582,18 @@ under a targeted policy in enforcing mode. Two things still matter:
 - **`semanage` comes from `policycoreutils-python-utils`,** which is required only when the role
   manages contexts.
 
+### noexec /tmp
+
+The STIG mounts `/tmp`, `/var/tmp` and `/dev/shm` with `noexec`. Elasticsearch 9 loads its own native
+code from `lib/platform` in its home, so it starts either way, but anything it unpacks from a jar and
+loads from its temporary directory fails there: the console library jansi on every start (logged as
+`failed to map segment from shared object`), and any module or plugin that ships JNA or another
+library packaged the same way. By default the package creates that directory under the service's private `/tmp`,
+which keeps the `noexec` flag. The role sets `ES_TMPDIR` to `elasticsearch_tmp_dir`
+(`/var/lib/elasticsearch/tmp` by default, owned by `elasticsearch`) in the systemd drop-in instead.
+It has to be on a filesystem without `noexec`. Set `elasticsearch_tmp_dir: ""` to keep the package
+default. Changing it restarts Elasticsearch, as a rolling restart.
+
 ## Notes and caveats
 
 - **Adding nodes.** Add the host to the cluster group and run the play against the whole group. The existing nodes' `discovery.seed_hosts` changes when you add a master-eligible node, so they get a rolling restart. Adding data-only nodes changes nothing on the existing nodes.
@@ -706,6 +718,10 @@ The machine running Molecule needs libvirt, `virt-install`, `qemu-img` and `xorr
 must be able to manage `qemu:///system`. Each cloud image downloads once, checksum verified, to
 `/var/lib/libvirt/images/molecule`; each VM gets a throwaway disk on top of it. VM names include the
 scenario, so the three scenarios can also run side by side if the machine has the memory.
+
+[`molecule/kvm-noexec/`](molecule/kvm-noexec/) runs the kvm scenario with `/tmp`, `/var/tmp`,
+`/dev/shm` and `/home` mounted `noexec`, as the STIG has them, and checks that Elasticsearch uses
+`elasticsearch_tmp_dir` and logged no library that failed to load (`molecule test -s kvm-noexec`).
 
 ## Role layout
 

@@ -1,0 +1,51 @@
+---
+- name: Verify as in the default scenario
+  ansible.builtin.import_playbook: ../default/verify.yml
+
+- name: Verify Elasticsearch runs without an executable /tmp
+  hosts: elasticsearch
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Read the mount options of /tmp
+      ansible.builtin.command:
+        argv: [findmnt, --noheadings, --output, OPTIONS, --target, /tmp]
+      register: test_tmp_options
+      changed_when: false
+
+    - name: Check /tmp is still noexec
+      ansible.builtin.assert:
+        that:
+          - "'noexec' in test_tmp_options.stdout.split(',')"
+
+    - name: Read the server's command line
+      ansible.builtin.command:
+        argv: [pgrep, --list-full, --uid, elasticsearch, --full, org.elasticsearch.bootstrap.Elasticsearch]
+      register: test_server
+      changed_when: false
+
+    - name: Check the server uses the role's temporary directory
+      ansible.builtin.assert:
+        that:
+          - test_server.stdout is search('-Djava[.]io[.]tmpdir=/var/lib/elasticsearch/tmp( |$)')
+        fail_msg: "{{ test_server.stdout }}"
+
+    # A native library unpacked to a noexec directory fails to load with
+    # "failed to map segment from shared object"; the console library jansi
+    # says to avoid noexec
+    - name: Look for native libraries that failed to load
+      ansible.builtin.shell: >-
+        set -o pipefail;
+        journalctl --unit elasticsearch --boot --no-pager --output cat
+        | grep -iE 'failed to map segment|noexec'
+      args:
+        executable: /bin/bash
+      register: test_load_errors
+      changed_when: false
+      failed_when: test_load_errors.rc not in [0, 1]
+
+    - name: Check none did
+      ansible.builtin.assert:
+        that:
+          - test_load_errors.rc == 1
+        fail_msg: "{{ test_load_errors.stdout_lines }}"
