@@ -5,6 +5,6 @@
 {% else %}
 # Heap size is chosen automatically by Elasticsearch.
 {% endif %}
-{% for option in elasticsearch_jvm_options %}
+{% for option in _es_jvm_options %}
 {{ option }}
 {% endfor %}

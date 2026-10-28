@@ -1,19 +1,92 @@
 ---
 # Rewrites the fapolicyd trust entries on one node. The entries hold a size and
 # a checksum per file, and plugin files carry the Elasticsearch version in
-# their names, so they are rewritten whenever plugins change: in phase 1, and
-# during a rolling upgrade once the plugins have been reinstalled for the new
-# version, before the node starts again.
+# their names, so they are rewritten whenever the package or the plugins
+# change: in phase 1, and during a rolling upgrade once the new package is
+# installed and the plugins have been reinstalled for it, before the node
+# starts again.
 # Inputs:
 #   _es_fapolicyd_host   node to act on (tasks are delegated to it); its
-#                        _es_fapolicyd_trust fact gives the paths and the trust file
+#                        _es_fapolicyd_trust fact gives the paths, the trust
+#                        file and the Elasticsearch home
+
+- name: "fapolicyd | Create the native library directory on {{ _es_fapolicyd_host }}"
+  ansible.builtin.file:
+    path: "{{ hostvars[_es_fapolicyd_host]._es_fapolicyd_trust.native_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  delegate_to: "{{ _es_fapolicyd_host }}"
+
+# Python, because the hosts have no unzip for ansible.builtin.unarchive. A
+# library is rewritten only when the package's copy differs, and files no
+# longer wanted (other versions) are removed. Prints what the directory holds,
+# since fapolicyd-cli refuses to add an empty one.
+- name: "fapolicyd | Unpack the native libraries from their jars on {{ _es_fapolicyd_host }}"
+  ansible.builtin.command:
+    argv: >-
+      {{ ['/usr/bin/python3', '-c', _es_native_script, hostvars[_es_fapolicyd_host]._es_fapolicyd_trust.home,
+          hostvars[_es_fapolicyd_host]._es_fapolicyd_trust.native_dir,
+          hostvars[_es_fapolicyd_host]._es_fapolicyd_trust.native_libs | to_json] }}
+  vars:
+    _es_native_script: |
+      import glob, json, os, re, sys
+      import zipfile
+      home, dest, libs = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
+      wanted, changed = set(), False
+      for lib in libs:
+          jars = sorted(glob.glob(os.path.join(home, lib["jar"]), recursive=True))
+          if not jars:
+              if lib["required"]:
+                  sys.exit("no jar matches %s under %s" % (lib["jar"], home))
+              continue
+          pattern = re.compile(lib["entry"])
+          with zipfile.ZipFile(jars[-1]) as z:
+              names = [n for n in z.namelist() if pattern.fullmatch(n)]
+              if len(names) != 1:
+                  sys.exit("expected one %s in %s, found %s" % (lib["entry"], jars[-1], names))
+              data = z.read(names[0])
+          name = os.path.basename(names[0])
+          wanted.add(name)
+          path = os.path.join(dest, name)
+          try:
+              with open(path, "rb") as f:
+                  same = f.read() == data
+          except FileNotFoundError:
+              same = False
+          if not same:
+              with open(path + ".tmp", "wb") as f:
+                  f.write(data)
+              os.chmod(path + ".tmp", 0o644)
+              os.replace(path + ".tmp", path)
+              changed = True
+      for f in os.listdir(dest):
+          if f not in wanted:
+              os.remove(os.path.join(dest, f))
+              changed = True
+      print(json.dumps({"changed": changed, "files": sorted(wanted)}))
+  delegate_to: "{{ _es_fapolicyd_host }}"
+  register: _es_native_unpacked
+  changed_when: (_es_native_unpacked.stdout | from_json).changed
 
 - name: "fapolicyd | Check which paths exist on {{ _es_fapolicyd_host }}"
   ansible.builtin.stat:
     path: "{{ item }}"
-  loop: "{{ hostvars[_es_fapolicyd_host]._es_fapolicyd_trust.paths }}"
+  loop: >-
+    {{ hostvars[_es_fapolicyd_host]._es_fapolicyd_trust.paths
+       + ([hostvars[_es_fapolicyd_host]._es_fapolicyd_trust.native_dir]
+          if (_es_native_unpacked.stdout | default('{"files": []}') | from_json).files | length > 0 else []) }}
   delegate_to: "{{ _es_fapolicyd_host }}"
   register: _es_fapolicyd_path_stat
+
+- name: "fapolicyd | Find the package files rpm trust leaves out on {{ _es_fapolicyd_host }}"
+  ansible.builtin.find:
+    paths: "{{ hostvars[_es_fapolicyd_host]._es_fapolicyd_trust.home }}"
+    patterns: "{{ hostvars[_es_fapolicyd_host]._es_fapolicyd_trust.patterns }}"
+    recurse: true
+  delegate_to: "{{ _es_fapolicyd_host }}"
+  register: _es_fapolicyd_libs
 
 - name: "fapolicyd | Remove the previous trust entries on {{ _es_fapolicyd_host }}"
   ansible.builtin.file:
@@ -38,9 +111,55 @@
   delay: "{{ elasticsearch_task_delay }}"
   changed_when: true
 
+# One task for all of them: there are dozens, and a task each would cost a
+# round trip each on a slow link. Files already under a trusted path are left
+# out, because fapolicyd-cli refuses to add a file twice.
+- name: "fapolicyd | Trust the package files rpm trust leaves out on {{ _es_fapolicyd_host }}"
+  ansible.builtin.command:
+    argv: >-
+      {{ ['/bin/bash', '-c', _es_fapolicyd_libs_script, 'fapolicyd-trust-libs',
+          hostvars[_es_fapolicyd_host]._es_fapolicyd_trust.name] + _es_fapolicyd_lib_paths }}
+  vars:
+    # Matches a trusted file, or anything under a trusted directory
+    _es_fapolicyd_trusted_re: >-
+      ^({{ _es_fapolicyd_path_stat.results | selectattr('stat.exists')
+           | map(attribute='item') | map('regex_replace', '/+$', '') | map('regex_escape')
+           | map('regex_replace', '$', '(/.*)?') | join('|') }})$
+    _es_fapolicyd_lib_paths: >-
+      {{ _es_fapolicyd_libs.files | map(attribute='path')
+         | reject('match', _es_fapolicyd_trusted_re) | list }}
+    _es_fapolicyd_libs_script: |
+      trust_file=$1; shift
+      for lib in "$@"; do
+        /usr/sbin/fapolicyd-cli --file add "$lib" --trust-file "$trust_file" || exit
+      done
+  delegate_to: "{{ _es_fapolicyd_host }}"
+  register: _es_fapolicyd_libs_added
+  changed_when: true
+  when: _es_fapolicyd_lib_paths | length > 0
+
 - name: "fapolicyd | Load the trust database on {{ _es_fapolicyd_host }}"
   ansible.builtin.command:
     cmd: /usr/sbin/fapolicyd-cli --update
   delegate_to: "{{ _es_fapolicyd_host }}"
   changed_when: true
-  when: _es_fapolicyd_added is changed
+  when: _es_fapolicyd_added is changed or _es_fapolicyd_libs_added is changed
+
+- name: "fapolicyd | Read the package and plugin fingerprint on {{ _es_fapolicyd_host }}"
+  ansible.builtin.command:
+    argv: "{{ _es_fapolicyd_fingerprint_argv[:-1] + [hostvars[_es_fapolicyd_host]._es_fapolicyd_trust.home] }}"
+  delegate_to: "{{ _es_fapolicyd_host }}"
+  register: _es_fapolicyd_fingerprint_now
+  changed_when: false
+  check_mode: false
+
+- name: "fapolicyd | Record what the entries were written for on {{ _es_fapolicyd_host }}"
+  ansible.builtin.copy:
+    dest: "{{ hostvars[_es_fapolicyd_host]._es_fapolicyd_trust.state }}"
+    content: >-
+      {{ {'spec': hostvars[_es_fapolicyd_host]._es_fapolicyd_trust.spec,
+          'fingerprint': _es_fapolicyd_fingerprint_now.stdout} | to_json }}
+    owner: root
+    group: root
+    mode: "0644"
+  delegate_to: "{{ _es_fapolicyd_host }}"

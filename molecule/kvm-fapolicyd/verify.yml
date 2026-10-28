@@ -1,0 +1,45 @@
+---
+- name: Verify as in the default scenario
+  ansible.builtin.import_playbook: ../default/verify.yml
+
+- name: Verify fapolicyd let the upgraded cluster run
+  hosts: elasticsearch
+  become: true
+  gather_facts: false
+  vars:
+    test_trust_file: /etc/fapolicyd/trust.d/ansible-elasticsearch
+  tasks:
+    - name: Check fapolicyd is still running
+      ansible.builtin.command: systemctl is-active fapolicyd  # noqa: command-instead-of-module - only reads the state
+      changed_when: false
+
+    # Without it the test proves nothing, see prepare.yml
+    - name: Check fapolicyd watches whole filesystems
+      ansible.builtin.command:
+        argv: [grep, -Eq, '^\s*allow_filesystem_mark\s*=\s*1', /etc/fapolicyd/fapolicyd.conf]
+      changed_when: false
+
+    - name: Check the trust entries cover the launcher, the upgraded plugin and jansi's library
+      ansible.builtin.command:
+        argv: [grep, -Eq, "{{ item }}", "{{ test_trust_file }}"]
+      loop:
+        - '^/usr/share/elasticsearch/lib/tools/server-launcher/server-launcher '
+        - '^/usr/share/elasticsearch/plugins/mapper-size/[^ ]*{{ test_version | regex_escape }}[^ ]*[.]jar '
+        - '^/usr/local/lib/ansible-elasticsearch/libjansi[.]so '
+      changed_when: false
+
+    - name: Read what fapolicyd denied
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          journalctl -u fapolicyd -o cat --no-pager | grep 'dec=deny' | sed -E 's/ pid=[0-9]+//' | sort | uniq -c
+        executable: /bin/bash
+      register: test_denials
+      changed_when: false
+      failed_when: test_denials.rc not in [0, 1]
+
+    - name: Check fapolicyd denied nothing
+      ansible.builtin.assert:
+        that:
+          - test_denials.stdout_lines | length == 0
+        fail_msg: "{{ test_denials.stdout_lines }}"

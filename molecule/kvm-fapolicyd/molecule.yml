@@ -1,0 +1,85 @@
+---
+# The upgrade scenario on three AlmaLinux 10 VMs with fapolicyd enforcing and
+# watching whole filesystems, to test the trust entries: converge installs
+# the cluster on an older release, side_effect upgrades it in a rolling
+# restart, and verify checks the upgraded cluster as the default scenario
+# does, and that fapolicyd denied nothing. Nothing is added to fapolicyd's
+# rules for Ansible, which runs as root without pipelining, as in production.
+# Needs the same KVM/libvirt setup as ../kvm.
+#   molecule test -s kvm-fapolicyd
+role_name_check: 1
+
+dependency:
+  name: galaxy
+
+driver:
+  name: default
+  options:
+    managed: true
+
+platforms:
+  - name: es-1
+    image_url: https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-latest.x86_64.qcow2
+    image_checksum: sha256:https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/CHECKSUM
+    osinfo: almalinux10
+    memory_mb: 3072
+    vcpus: 2
+    disk_gb: 20
+    groups:
+      - elasticsearch
+      - kvm
+  - name: es-2
+    image_url: https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-latest.x86_64.qcow2
+    image_checksum: sha256:https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/CHECKSUM
+    osinfo: almalinux10
+    memory_mb: 3072
+    vcpus: 2
+    disk_gb: 20
+    groups:
+      - elasticsearch
+      - kvm
+  - name: es-3
+    image_url: https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-latest.x86_64.qcow2
+    image_checksum: sha256:https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/CHECKSUM
+    osinfo: almalinux10
+    memory_mb: 3072
+    vcpus: 2
+    disk_gb: 20
+    groups:
+      - elasticsearch
+      - kvm
+
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      host_key_checking: false
+    ssh_connection:
+      pipelining: false
+  playbooks:
+    create: ../kvm/create.yml
+    destroy: ../kvm/destroy.yml
+    prepare: prepare.yml
+    converge: ../upgrade/converge.yml
+    side_effect: ../upgrade/side_effect.yml
+    verify: verify.yml
+  inventory:
+    links:
+      group_vars: ../kvm/inventory/group_vars/
+      host_vars: ../kvm/inventory/host_vars/
+
+verifier:
+  name: ansible
+
+scenario:
+  test_sequence:
+    - dependency
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - side_effect
+    - verify
+    - destroy
