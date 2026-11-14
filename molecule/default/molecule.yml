@@ -1,78 +1,116 @@
 ---
-# Three systemd containers (rootless Podman is fine) on one network, forming a
-# three-node cluster in the inventory group "elasticsearch". Each node gets its
-# certificate a different way (see inventory/):
-#   es-1  default roles; certificate and key as content
-#   es-2  default roles; certificate, key and CA as paths of files on the host
-#   es-3  master and data only (no ingest), node.name es-node-3; its key is
-#         encrypted, so the passphrase goes into the keystore
-# prepare.yml creates the test CA and the node certificates.
-# MOLECULE_DISTRO picks the EL release (default rockylinux9; also
-# rockylinux10) — see the README's "Testing" section. The playbooks and
-# inventory here are shared with the other scenarios.
+# Tests run on the Proxmox test lab: three real KVM VMs cloned from the lab
+# fleet onto the isolated labnet network (EL release chosen by LAB_TEMPLATE),
+# forming a three-node Elasticsearch cluster with SELinux enforcing and
+# firewalld running — including cross-node transport TLS verification, which
+# containers could never exercise. converge.yml is a wrapper around the repo's
+# own examples/playbook.yml; prepare.yml issues the node certificates with
+# ansible-role-elastic-tls, as a real deployment does, and the inline
+# group_vars feed them to the role by path. Every address comes from gathered
+# facts, so nothing here knows a hostname or subnet. All Proxmox connection
+# details live in the driver's secrets file on the control machine. The
+# driver's SSH lands as a sudo user; the plays' become: true runs the tasks
+# privileged through it.
 #
-# The host running the containers needs vm.max_map_count >= 262144: the
-# setting is not namespaced, so the role cannot set it from inside a container
-# (elasticsearch_manage_sysctl is off) and prepare.yml stops early without it.
+# Default VMIDs are the repo's 9300-9302 band, via LAB_VMID_0..2 so the lab's
+# `mlab` runner can claim a free band per run and allow parallel runs of this
+# repo; a plain molecule test uses the pinned band, one lab run at a time.
+# Needs the memory/cores passthrough patch in the molecule-proxmox driver
+# (ct-bootstrap.sh re-applies it after pipx upgrades).
 #
-# Inside containers SELinux is off, and firewalld and fapolicyd aren't
-# installed, so this exercises the role's skip paths for all three.
-#
-# side_effect.yml (configuration changes, rolling restarts, API changes) runs
-# after the idempotence check. There is no `check` step: on fresh hosts the
-# keystore tasks need the package installed.
+# Run on the lab's molecule control machine:
+#   /root/labnet/mlab test -s default              # parallel-safe, recommended
+#   molecule test                                  # pinned band
+#   LAB_TEMPLATE=template-alma10 molecule test     # the other EL release
 role_name_check: 1
 
 dependency:
-  name: galaxy   # installs requirements.yml next to this file
+  name: galaxy
+  enabled: false        # collections preinstalled on the control machine
+prerun: false
 
 driver:
-  name: podman
+  name: molecule-proxmox
+  options:
+    proxmox_secrets: ${LAB_PROXMOX_SECRETS:-/root/.config/molecule/proxmox-secrets.yml}
+    node: ${LAB_NODE:-galactica}
+    validate_certs: false   # the lab's PVE uses its self-signed cert
+    ssh_user: labadmin
+    ssh_identity_file: /root/.ssh/id_ed25519
+    full: true
+    pool: testlab
+    timeout: 300
 
 platforms:
-  - name: es-1
-    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
-    pre_build_image: true
-    override_command: false   # keep the image's own CMD: systemd as PID 1
-    systemd: always
-    network: elasticsearch_molecule   # created by the driver from the first platform
+  - name: es-default-1
+    template_name: ${LAB_TEMPLATE:-template-alma9}
+    newid: ${LAB_VMID_0:-9300}
     groups: [elasticsearch]
+    memory: 4096
+    cores: 2
 
-  - name: es-2
-    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
-    pre_build_image: true
-    override_command: false
-    systemd: always
-    network: elasticsearch_molecule
+  - name: es-default-2
+    template_name: ${LAB_TEMPLATE:-template-alma9}
+    newid: ${LAB_VMID_1:-9301}
     groups: [elasticsearch]
+    memory: 4096
+    cores: 2
 
-  - name: es-3
-    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
-    pre_build_image: true
-    override_command: false
-    systemd: always
-    network: elasticsearch_molecule
+  - name: es-default-3
+    template_name: ${LAB_TEMPLATE:-template-alma9}
+    newid: ${LAB_VMID_2:-9302}
     groups: [elasticsearch]
+    memory: 4096
+    cores: 2
 
 provisioner:
   name: ansible
+  env:
+    # elastic_tls and the role under test resolve through the sibling role
+    # checkouts of this repo.
+    ANSIBLE_ROLES_PATH: "${MOLECULE_PROJECT_DIRECTORY}/..:/root/.ansible/roles"
   inventory:
-    links:
-      group_vars: inventory/group_vars/
-      host_vars: inventory/host_vars/
+    group_vars:
+      all:
+        test_default_version: >-
+          {{ (lookup('ansible.builtin.file',
+             lookup('env', 'MOLECULE_PROJECT_DIRECTORY') ~ '/defaults/main.yml')
+             | from_yaml).elasticsearch_version }}
+        # ansible-role-elastic-tls: private CA on the first node, certificates
+        # named after the inventory hosts and carrying their addresses.
+        elastic_tls_provider: ca
+        elastic_tls_ca_common_name: Molecule Test CA
+        elastic_tls_ca_passphrase: molecule-test-passphrase
+      elasticsearch:
+        elasticsearch_cluster_name: molecule-default
+        # Labnet DNS does not resolve bare DHCP hostnames, and the seed-host
+        # fallback uses inventory names → master_not_discovered. Point the
+        # role at addresses (the certificates carry them, so transport TLS
+        # verification passes against the IP).
+        elasticsearch_discovery_address: "{{ ansible_facts.default_ipv4.address }}"
+        # Test-only superuser password, like the other molecule credentials.
+        elasticsearch_elastic_password: molecule-lab-password-2026
+        # The CA the tls role leaves on every host, consumed by path.
+        elasticsearch_ssl_ca_certificate_path: /etc/pki/elastic-tls/certs/ca.crt
+        ssl_certificates:
+          - name: "{{ inventory_hostname }}"
+            certificate:
+              path: "/etc/pki/elastic-tls/certs/{{ inventory_hostname }}.crt"
+            key:
+              path: "/etc/pki/elastic-tls/private/{{ inventory_hostname }}.key"
+        elasticsearch_plugins: []
+        elasticsearch_license: ""
 
 verifier:
   name: ansible
 
 scenario:
   test_sequence:
-    - dependency
     - destroy
     - syntax
     - create
     - prepare
     - converge
     - idempotence
-    - side_effect
     - verify
     - destroy

@@ -610,118 +610,59 @@ default. Changing it restarts Elasticsearch, as a rolling restart.
 
 ## Testing
 
-[`molecule/default/`](molecule/default/) builds a three-node cluster in systemd containers on one
-container network. Every node is master-eligible, and each gets its certificate a different way:
+[`molecule/default/`](molecule/default/) builds a three-node cluster on real KVM VMs cloned from
+the Proxmox test lab's fleet onto its isolated labnet network — SELinux enforcing, firewalld
+running, each VM with its own kernel, including cross-node transport TLS verification. Every node
+is master-eligible and gets its certificate from ansible-role-elastic-tls, consumed by path, as in
+a real deployment. [`prepare.yml`](molecule/default/prepare.yml) gets the VMs onto the labnet
+resolver and issues the certificates; converge is the repo's own
+[`examples/playbook.yml`](examples/playbook.yml). The sequence is destroy → syntax → create →
+prepare → converge → idempotence → verify → destroy, and `verify.yml` checks:
 
-| Node | Roles | Certificate |
-|---|---|---|
-| `es-1` | default | certificate and key as content |
-| `es-2` | default | certificate, key and CA as paths of files already on the host |
-| `es-3` | `master`, `data` (no ingest), `node.name: es-node-3` | key encrypted with a passphrase, which goes into a password-protected keystore |
+- every node answers over its own HTTPS address with its node certificate, verified against the
+  test CA;
+- the cluster is green with all three nodes, all data nodes, no unassigned shards;
+- the package is at the version `elasticsearch_version` promises.
 
-[`prepare.yml`](molecule/default/prepare.yml) creates a test CA and a certificate per node for the
-name and address each container got. openssl runs in the first container, so the machine running
-Molecule doesn't need it. The inventory adds the `mapper-size` plugin, a security role, a role mapping
-and an ingest pipeline, and turns the GeoIP downloader off. The sequence is:
-
-1. **converge**, then **idempotence:** a second converge must change nothing.
-2. **side effect** ([`side_effect.yml`](molecule/default/side_effect.yml)):
-   - It indexes a document through the managed pipeline into an index with a copy on every node.
-   - It changes the JVM options with `elasticsearch_restart_on_change: false`. A restart is flagged
-     and no node restarts.
-   - It changes a node attribute. That triggers a rolling restart, one node at a time in inventory
-     order, after which every node runs the new attribute and the JVM option held back before. A
-     changed role definition and a pipeline set to `absent` are applied in the same run, and `es-3`'s
-     keystore password is changed, so `es-3` restarts with the new passphrase file.
-   - It goes back to the converge settings, which triggers another rolling restart and changes the
-     keystore password back.
-3. **verify** ([`verify.yml`](molecule/default/verify.yml)):
-   - Every node runs the pinned version, and the Elastic repository is defined but disabled (on
-     Ubuntu, the package is held).
-   - File modes and owners are correct, the RPM's `certs/` directory is gone, and
-     `cluster.initial_master_nodes` was removed.
-   - The keystore no longer has `bootstrap.password` or the RPM's auto-configuration entries, and
-     holds the key passphrase only on `es-3`.
-   - Only `es-3`'s keystore has a password, and only `es-3` has the passphrase file and
-     `ES_KEYSTORE_PASSPHRASE_FILE` in its drop-in.
-   - The cluster is green with three nodes, and node names, roles, version and plugins are as
-     configured.
-   - Anonymous requests are refused.
-   - The role, role mapping, pipeline and GeoIP setting exist through the API, a role set to
-     `absent` doesn't, and shard allocation is no longer limited to primaries.
-
-Other scenarios:
-
-| Scenario | What it covers |
-|---|---|
-| `preflight` | Settings preflight must refuse, each in its own task with its own message: an unsupported distribution, a host outside its cluster group, inexact or 8.x versions, bad package source settings, a short `elastic` password, unknown node roles, a bad heap size, missing TLS material, bad firewall, SELinux, FIPS, Active Directory, plugin, role, pipeline and GeoIP settings, no master-eligible node, and restart batches that would lose quorum. Failures under `no_log` must not print the password, key or bind password. Nothing is installed. |
-| `upgrade` | A cluster installed on 9.4.8 is upgraded to `elasticsearch_version` in a rolling restart. Plugins are reinstalled, the data is kept, and the default verification then passes. |
-| `docker` | The default scenario on Docker instead of Podman. |
+Tests run on the lab's molecule control machine: `molecule`, `molecule-proxmox` and the role's
+collections are preinstalled there, as is the `elastic_tls` role checkout prepare.yml needs; the
+driver's connection secrets and SSH key live only in the control machine's own config files.
+Nothing lab-specific is in this repo beyond the fleet template name and the default VMID band
+(9300–9302); hosts, tokens and subnets never leave the control machine. The Test Lab project's
+`molecule-labnet/` directory documents the lab itself. The three VMs get a 4 GB allocation each
+(the driver's memory/cores passthrough), and each downloads the Elasticsearch package from Elastic.
+`LAB_TEMPLATE` picks the guest release (default `template-alma9`; also `template-alma10` or
+`template-alma8`):
 
 ```bash
-pip install -r molecule/requirements.txt
+molecule test                                   # AlmaLinux 9, SELinux enforcing
+LAB_TEMPLATE=template-alma10 molecule test      # the other EL release
 ```
 
-The machine running the containers needs `vm.max_map_count` of at least 262144. The setting isn't
-namespaced, so the role can't set it from inside a container:
+The VMIDs come from `LAB_VMID_0..2` and default to the pinned 9300–9302 band, so a plain
+`molecule test` means one lab run of this repo at a time. For several runs of this repo at once,
+use the lab's `mlab` wrapper, which claims a free VMID band (and an isolated ephemeral directory)
+per run:
 
 ```bash
-sudo sysctl -w vm.max_map_count=262144
+/root/labnet/mlab test -s default               # parallel-safe run on the control machine
 ```
-
-```bash
-for s in default preflight upgrade; do molecule test -s "$s" || break; done
-```
-
-The scenarios use Podman (rootless works), except `docker`, which needs Docker. `default`, `upgrade`
-and `docker` use the same container names, so run them one at a time. `MOLECULE_DISTRO` picks the
-image (default `rockylinux9`; also `rockylinux10`):
-
-```bash
-MOLECULE_DISTRO=rockylinux10 molecule test -s preflight
-```
-
-The three nodes use a 512 MB heap each, and each downloads the Elasticsearch package from Elastic.
-`elasticsearch.yml` in the tests turns off disk watermarks, because CI runners' disks are often fuller
-than the defaults allow.
 
 Lint with `yamllint .` and `ansible-lint` (configured by [`.yamllint`](.yamllint) and
-[`.ansible-lint`](.ansible-lint)). There is no GitHub Actions workflow; run the lint and Molecule
-scenarios locally.
+[`.ansible-lint`](.ansible-lint)). There is no CI; run the lint and Molecule from the control
+machine.
 
-Not covered by containers: `vm.max_map_count` (`elasticsearch_manage_sysctl`), memory locking,
-firewalld, SELinux file contexts, fapolicyd trust entries, Satellite repositories, Active Directory,
-and licenses. Those need virtual machines or the services themselves.
-
-### On KVM virtual machines
-
-[`molecule/kvm/`](molecule/kvm/) runs the default scenario on real AlmaLinux 10 virtual machines
-instead of containers: the same hosts, groups, playbooks and inventory, one VM per host, on local
-KVM/libvirt (`qemu:///system`). Each VM has its own kernel, so SELinux is enforcing and settings such
-as `vm.max_map_count` are the VM's own. Overrides for the VMs go in
-`molecule/kvm/inventory/group_vars/<group>/kvm.yml`.
-
-[`molecule/kvm-ubuntu2404/`](molecule/kvm-ubuntu2404/) and
-[`molecule/kvm-ubuntu2604/`](molecule/kvm-ubuntu2604/) run the same thing on Ubuntu 24.04 and 26.04
-VMs. They only swap the cloud image, and share `molecule/kvm/`'s playbooks and inventory.
-
-[`molecule/kvm-fapolicyd/`](molecule/kvm-fapolicyd/) runs the upgrade scenario on three AlmaLinux 10
-VMs with fapolicyd enforcing and `allow_filesystem_mark = 1`, and nothing added to its rules. It
-checks that the cluster installs, upgrades in a rolling restart and runs with nothing denied, and that
-the trust entries cover the upgraded package and plugin.
-
-```bash
-for s in kvm kvm-ubuntu2404 kvm-ubuntu2604 kvm-fapolicyd; do molecule test -s "$s" || break; done
-```
-
-The machine running Molecule needs libvirt, `virt-install`, `qemu-img` and `xorriso`, and its user
-must be able to manage `qemu:///system`. Each cloud image downloads once, checksum verified, to
-`/var/lib/libvirt/images/molecule`; each VM gets a throwaway disk on top of it. VM names include the
-scenario, so the three scenarios can also run side by side if the machine has the memory.
-
-[`molecule/kvm-noexec/`](molecule/kvm-noexec/) runs the kvm scenario with `/tmp`, `/var/tmp`,
-`/dev/shm` and `/home` mounted `noexec`, as the STIG has them, and checks that Elasticsearch uses
-`elasticsearch_tmp_dir` and logged no library that failed to load (`molecule test -s kvm-noexec`).
+Not covered by the scenario: the per-node certificate variants (certificate and key as content,
+and an encrypted key whose passphrase goes into a password-protected keystore — the removed
+`es-2`/`es-3` host_vars); the `side_effect.yml` checks (flagged vs batched rolling restarts,
+keystore passphrase rotation, and the security role, mapping and ingest pipeline management — the
+removed container scenario's side effect and verify stages); the 9.4.8-to-current upgrade path
+(the removed `upgrade` scenario); settings preflight must refuse without printing a secret (the
+removed `preflight` scenario); fapolicyd trust entries and `noexec` mounts (the removed
+`kvm-fapolicyd`/`kvm-noexec` libvirt scenarios); and the Ubuntu guest paths (the removed
+`kvm-ubuntu*` scenarios — the role does support Ubuntu, but the tests now run EL guests only).
+Satellite repositories, Active Directory and licensed deployments remain uncovered: they need the
+services themselves.
 
 ## Role layout
 

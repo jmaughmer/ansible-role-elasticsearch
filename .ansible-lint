@@ -5,6 +5,13 @@ exclude_paths:
   - .ansible/
   - .github/
 
+# examples/playbook.yml and molecule/default/prepare.yml apply roles by the
+# names they are installed under (from examples/requirements.yml and the lab
+# control machine's roles path), which are not present here.
+mock_roles:
+  - elasticsearch
+  - elastic_tls
+
 # Reported but not fatal: these flag existing tasks in tasks/ (systemctl and rpm
 # queries, keystore and subscription-manager commands, set_fact after a change,
 # lower-case "fapolicyd |" names). Move each rule out of this list once the
